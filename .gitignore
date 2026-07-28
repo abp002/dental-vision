@@ -1,0 +1,22 @@
+# Dataset: 10 GB de radiografias. Se descarga con scripts/descargar_dentex.sh
+data/
+
+# Salidas generadas (renders, odontogramas, graficas)
+salidas/
+runs/
+
+# Modelos entrenados
+modelos/
+*.pt
+*.pth
+*.onnx
+*.joblib
+
+# Notebooks: se versiona el codigo, no las salidas ejecutadas
+.ipynb_checkpoints/
+
+# Entorno
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
