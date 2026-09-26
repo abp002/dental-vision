@@ -3,21 +3,27 @@
 La métrica estándar en detección es mAP. Es útil para comparar con la
 literatura y no le dice absolutamente nada a un dentista.
 
-Aquí se miden tres cosas que sí significan algo en la consulta:
+Aquí se miden cosas que sí significan algo en la consulta:
 
-  cobertura   de las piezas realmente presentes, cuántas encuentra
-  numeración  de las que encuentra, a cuántas les pone el número FDI correcto
-  perfectos   en cuántas radiografías el odontograma sale entero sin un fallo
+  cobertura    de las piezas realmente presentes, cuántas encuentra
+  numeración   de las que encuentra, a cuántas les pone el número FDI correcto
+  exactitud    de las piezas presentes, cuántas salen encontradas Y bien
+               numeradas (cobertura x numeración)
+  errores      correcciones por radiografía: piezas que faltan, números mal
+               puestos y detecciones que sobran. Es lo que tiene que arreglar
+               el profesional al revisar el borrador
+  perfectos    radiografías cuyo odontograma sale sin un solo fallo
 
-La tercera es la que decide si la herramienta se usa. Un sistema con 97% de
-numeración correcta suena magnífico hasta que caes en que, con 28 piezas por
-boca, eso son casi 1 error por radiografía: el profesional tiene que revisarlo
-todo igualmente y el ahorro de tiempo desaparece.
+Un sistema con 97% de numeración correcta suena magnífico hasta que caes en
+que, con 28 piezas por boca, eso son casi 1 error por radiografía. Por eso se
+informa de los errores por radiografía y no solo de porcentajes por pieza.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import random
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 
 import torch
 
@@ -45,6 +51,9 @@ class Resultado:
     radiografias: int = 0
     radiografias_perfectas: int = 0
 
+    def __add__(self, otro: Resultado) -> Resultado:
+        return Resultado(*(a + b for a, b in zip(asdict(self).values(), asdict(otro).values())))
+
     @property
     def cobertura(self) -> float:
         return self.piezas_encontradas / max(1, self.piezas_reales)
@@ -52,6 +61,10 @@ class Resultado:
     @property
     def numeracion(self) -> float:
         return self.numeracion_correcta / max(1, self.piezas_encontradas)
+
+    @property
+    def exactitud(self) -> float:
+        return self.numeracion_correcta / max(1, self.piezas_reales)
 
     @property
     def perfectas(self) -> float:
@@ -62,53 +75,139 @@ class Resultado:
         fallos = (self.piezas_reales - self.numeracion_correcta) + self.falsos_positivos
         return fallos / max(1, self.radiografias)
 
+    def metricas(self) -> dict[str, float]:
+        return {
+            "cobertura": self.cobertura,
+            "numeracion": self.numeracion,
+            "exactitud": self.exactitud,
+            "errores_por_radiografia": self.errores_por_radiografia,
+            "perfectas": self.perfectas,
+        }
+
     def __str__(self) -> str:
         return (
             f"cobertura {self.cobertura:6.1%}   "
             f"numeracion {self.numeracion:6.1%}   "
-            f"odontogramas perfectos {self.perfectas:6.1%}   "
-            f"errores/radiografia {self.errores_por_radiografia:.2f}"
+            f"exactitud {self.exactitud:6.1%}   "
+            f"errores/radiografia {self.errores_por_radiografia:.2f}   "
+            f"perfectos {self.perfectas:6.1%}"
         )
 
 
-def evaluar(
-    predicciones: list[dict],
-    verdades: list[dict],
+def emparejar(
+    cajas_p: torch.Tensor, cajas_r: torch.Tensor, umbral_iou: float = 0.5
+) -> list[tuple[int, int]]:
+    """Parejas (predicción, pieza real). Las predicciones deben venir ordenadas
+    de más a menos confianza.
+
+    Voraz por confianza, como en COCO: cada predicción se queda con la pieza
+    real libre que más solapa. Si dos predicciones caen sobre el mismo diente
+    gana la más segura, y la otra queda sin pareja (falso positivo).
+    """
+    matriz = iou(cajas_p, cajas_r)
+    libres = torch.ones(len(cajas_r), dtype=torch.bool)
+    pares = []
+    for j in range(len(cajas_p)):
+        if not libres.any():
+            break
+        solape = torch.where(libres, matriz[j], torch.tensor(-1.0))
+        i = int(solape.argmax())
+        if solape[i] < umbral_iou:
+            continue
+        libres[i] = False
+        pares.append((j, i))
+    return pares
+
+
+def evaluar_radiografia(
+    pred: dict,
+    real: dict,
     *,
     umbral_iou: float = 0.5,
     umbral_score: float = 0.5,
 ) -> Resultado:
-    r = Resultado()
-    for pred, real in zip(predicciones, verdades):
-        r.radiografias += 1
-        keep = pred["scores"] >= umbral_score
-        cajas_p = pred["boxes"][keep].cpu()
-        etiq_p = pred["labels"][keep].cpu()
-        cajas_r = real["boxes"].cpu()
-        etiq_r = real["labels"].cpu()
+    r = Resultado(radiografias=1)
+    keep = pred["scores"] >= umbral_score
+    orden = torch.argsort(pred["scores"][keep], descending=True)
+    cajas_p = pred["boxes"][keep][orden].cpu()
+    etiq_p = pred["labels"][keep][orden].cpu()
+    cajas_r = real["boxes"].cpu()
+    etiq_r = real["labels"].cpu()
 
-        r.piezas_reales += len(cajas_r)
-        matriz = iou(cajas_r, cajas_p)
-
-        usadas: set[int] = set()
-        aciertos = 0
-        for i in range(len(cajas_r)):
-            if matriz.shape[1] == 0:
-                break
-            # Emparejamiento voraz por solapamiento. Suficiente aquí: los dientes
-            # apenas se solapan entre si, asi que no hay ambiguedad real.
-            orden = torch.argsort(matriz[i], descending=True)
-            for j in orden.tolist():
-                if j in usadas or matriz[i, j] < umbral_iou:
-                    break
-                usadas.add(j)
-                r.piezas_encontradas += 1
-                if etiq_p[j] == etiq_r[i]:
-                    r.numeracion_correcta += 1
-                    aciertos += 1
-                break
-
-        r.falsos_positivos += len(cajas_p) - len(usadas)
-        if aciertos == len(cajas_r) and len(cajas_p) == len(cajas_r):
-            r.radiografias_perfectas += 1
+    r.piezas_reales = len(cajas_r)
+    pares = emparejar(cajas_p, cajas_r, umbral_iou)
+    r.piezas_encontradas = len(pares)
+    r.numeracion_correcta = sum(int(etiq_p[j] == etiq_r[i]) for j, i in pares)
+    r.falsos_positivos = len(cajas_p) - r.piezas_encontradas
+    if r.numeracion_correcta == len(cajas_r) and len(cajas_p) == len(cajas_r):
+        r.radiografias_perfectas = 1
     return r
+
+
+def evaluar_por_radiografia(
+    predicciones: list[dict], verdades: list[dict], **umbrales
+) -> list[Resultado]:
+    return [
+        evaluar_radiografia(p, v, **umbrales)
+        for p, v in zip(predicciones, verdades, strict=True)
+    ]
+
+
+def evaluar(predicciones: list[dict], verdades: list[dict], **umbrales) -> Resultado:
+    return sum(evaluar_por_radiografia(predicciones, verdades, **umbrales), Resultado())
+
+
+def intervalo(
+    por_radiografia: list[Resultado],
+    metrica: Callable[[Resultado], float],
+    *,
+    repeticiones: int = 2000,
+    confianza: float = 0.95,
+    semilla: int = 0,
+) -> tuple[float, float]:
+    """Intervalo de confianza por bootstrap, remuestreando radiografías.
+
+    Se remuestrea por radiografía y no por pieza: los dientes de una misma boca
+    no son independientes (misma exposición, mismo paciente), y tratarlos como
+    tales daría intervalos falsamente estrechos.
+    """
+    rng = random.Random(semilla)
+    n = len(por_radiografia)
+    valores = sorted(
+        metrica(sum((por_radiografia[rng.randrange(n)] for _ in range(n)), Resultado()))
+        for _ in range(repeticiones)
+    )
+    cola = (1 - confianza) / 2
+    return valores[int(cola * repeticiones)], valores[int((1 - cola) * repeticiones) - 1]
+
+
+def intervalo_diferencia(
+    a: list[Resultado],
+    b: list[Resultado],
+    metrica: Callable[[Resultado], float],
+    *,
+    repeticiones: int = 2000,
+    confianza: float = 0.95,
+    semilla: int = 0,
+) -> tuple[float, float]:
+    """Intervalo de confianza de metrica(b) - metrica(a), con bootstrap emparejado.
+
+    `a` y `b` son dos modelos evaluados sobre las mismas radiografías, en el
+    mismo orden. En cada repetición se remuestrean las mismas radiografías para
+    los dos: la dificultad de cada radiografía se cancela y queda solo la
+    diferencia entre modelos. Si el intervalo contiene el 0, la diferencia no
+    se distingue del azar del conjunto de validación.
+    """
+    if len(a) != len(b):
+        raise ValueError("Los dos modelos deben evaluarse sobre las mismas radiografías")
+    rng = random.Random(semilla)
+    n = len(a)
+    diferencias = []
+    for _ in range(repeticiones):
+        idx = [rng.randrange(n) for _ in range(n)]
+        suma_a = sum((a[i] for i in idx), Resultado())
+        suma_b = sum((b[i] for i in idx), Resultado())
+        diferencias.append(metrica(suma_b) - metrica(suma_a))
+    diferencias.sort()
+    cola = (1 - confianza) / 2
+    return diferencias[int(cola * repeticiones)], diferencias[int((1 - cola) * repeticiones) - 1]

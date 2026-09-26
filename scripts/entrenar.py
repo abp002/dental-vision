@@ -1,65 +1,82 @@
 """Entrena el detector de piezas dentales.
 
 Uso:
-    uv run python scripts/entrenar.py --epocas 12 --ancho 800 --lote 2
+    uv run python scripts/entrenar.py --nombre base
 
-Guarda un punto de control por época en modelos/ y registra las métricas de
-validación en modelos/historial.jsonl.
+Cada ejecución guarda en modelos/<nombre>/ su configuración, el historial de
+validación por época (historial.jsonl), el último punto de control y el mejor
+según errores por radiografía en validación.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import random
 import sys
 import time
 from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(RAIZ / "src"))
-
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-# El benchmark mostro que la CPU es 17x mas rapida que MPS con Mask R-CNN:
-# sus operaciones dispersas (roi_align, nms) no tienen kernel Metal y hacen
-# fallback a CPU con copias constantes. Se fija el numero de hilos para
-# aprovechar los nucleos de rendimiento sin saturar la maquina.
-torch.set_num_threads(10)
-
-from dentalvision.datos import DientesDataset, colacion
+from dentalvision.datos import ANCHO, DientesDataset, colacion
 from dentalvision.dentex import Subconjunto
 from dentalvision.evaluacion import evaluar
-from dentalvision.modelo import crear, dispositivo
+from dentalvision.modelo import crear, dispositivo, sin_mascaras
 from dentalvision.particiones import particionar
+
+RAIZ = Path(__file__).resolve().parents[1]
 
 
 def argumentos():
     p = argparse.ArgumentParser()
-    p.add_argument("--epocas", type=int, default=12)
-    p.add_argument("--ancho", type=int, default=800)
+    p.add_argument("--nombre", default=time.strftime("%Y%m%d-%H%M%S"))
+    p.add_argument("--epocas", type=int, default=24)
+    p.add_argument("--ancho", type=int, default=ANCHO)
     p.add_argument("--lote", type=int, default=2)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--calentamiento", type=int, default=300,
+                   help="pasos de subida lineal del lr al principio")
+    p.add_argument("--rois", type=int, default=128, help="RoIs muestreadas por imagen")
+    p.add_argument("--congelar-bn", action="store_true",
+                   help="BatchNorm del backbone fija (FrozenBatchNorm2d)")
+    p.add_argument("--semilla", type=int, default=0)
+    p.add_argument("--trabajadores", type=int, default=6, help="procesos del DataLoader")
     p.add_argument("--limite", type=int, default=0, help="usar solo N imagenes (pruebas)")
-    p.add_argument("--dispositivo", default="cpu",
-                   help="cpu por defecto: MPS es 17x mas lento con Mask R-CNN")
+    p.add_argument("--dispositivo", default=None,
+                   help="cuda, cpu o mps (por defecto cuda si hay GPU NVIDIA)")
+    p.add_argument("--sin-amp", action="store_true",
+                   help="desactiva la precision mixta en CUDA")
     return p.parse_args()
+
+
+def fijar_semilla(semilla: int) -> None:
+    random.seed(semilla)
+    np.random.seed(semilla)
+    torch.manual_seed(semilla)
 
 
 @torch.no_grad()
 def validar(modelo, cargador, dev):
     modelo.eval()
     preds, reales = [], []
-    for imgs, tgts in cargador:
-        salida = modelo([x.to(dev) for x in imgs])
-        preds.extend({k: v.detach() for k, v in s.items()} for s in salida)
-        reales.extend(tgts)
+    with sin_mascaras(modelo):
+        for imgs, tgts in cargador:
+            salida = modelo([x.to(dev, non_blocking=True) for x in imgs])
+            # A CPU en cuanto salen: acumularlas en la GPU la llena sin necesidad.
+            preds.extend({k: v.cpu() for k, v in s.items()} for s in salida)
+            reales.extend(tgts)
     return evaluar(preds, reales)
 
 
 def main() -> int:
     a = argumentos()
     dev = torch.device(a.dispositivo) if a.dispositivo else dispositivo()
+    amp = dev.type == "cuda" and not a.sin_amp
+    fijar_semilla(a.semilla)
 
     sub = Subconjunto("enumeracion")
     part = particionar(sub)
@@ -67,60 +84,95 @@ def main() -> int:
     if a.limite:
         ent, val = ent[: a.limite], val[: max(2, a.limite // 4)]
 
-    print(f"dispositivo: {dev}   entrenamiento: {len(ent)}   validacion: {len(val)}")
+    destino = RAIZ / "modelos" / a.nombre
+    destino.mkdir(parents=True, exist_ok=False)  # no pisar ejecuciones anteriores
+    (destino / "config.json").write_text(json.dumps(vars(a), indent=2) + "\n")
+    historial = destino / "historial.jsonl"
+
+    print(f"dispositivo: {dev}  amp: {amp}  entrenamiento: {len(ent)}  "
+          f"validacion: {len(val)}  -> {destino}", flush=True)
 
     ds_ent = DientesDataset(sub, ent, ancho=a.ancho, aumentar=True)
-    ds_val = DientesDataset(sub, val, ancho=a.ancho, aumentar=False)
-    dl_ent = DataLoader(ds_ent, batch_size=a.lote, shuffle=True, collate_fn=colacion)
-    dl_val = DataLoader(ds_val, batch_size=a.lote, shuffle=False, collate_fn=colacion)
+    ds_val = DientesDataset(sub, val, ancho=a.ancho, con_mascaras=False)
+    comunes = dict(
+        batch_size=a.lote,
+        collate_fn=colacion,
+        num_workers=a.trabajadores,
+        persistent_workers=a.trabajadores > 0,
+        pin_memory=dev.type == "cuda",
+    )
+    dl_ent = DataLoader(ds_ent, shuffle=True, **comunes)
+    dl_val = DataLoader(ds_val, shuffle=False, **comunes)
 
-    modelo = crear().to(dev)
+    modelo = crear(ancho=a.ancho, rois=a.rois, congelar_bn=a.congelar_bn).to(dev)
     params = [p for p in modelo.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=1e-4)
-    plan = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epocas)
 
-    destino = RAIZ / "modelos"
-    destino.mkdir(exist_ok=True)
-    historial = destino / "historial.jsonl"
-    mejor = -1.0
+    # Subida lineal y después coseno, paso a paso. Las cabezas nuevas empiezan
+    # con pesos aleatorios: un lr alto de golpe desordena el backbone preentrenado.
+    total_pasos = a.epocas * len(dl_ent)
+
+    def factor(paso: int) -> float:
+        if paso < a.calentamiento:
+            return (paso + 1) / a.calentamiento
+        t = (paso - a.calentamiento) / max(1, total_pasos - a.calentamiento)
+        return 0.5 * (1 + math.cos(math.pi * t))
+
+    plan = torch.optim.lr_scheduler.LambdaLR(opt, factor)
+    escalador = torch.amp.GradScaler("cuda", enabled=amp)
+    mejor = math.inf
 
     for epoca in range(1, a.epocas + 1):
         modelo.train()
         t0, suma, n = time.perf_counter(), 0.0, 0
+        if dev.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         for i, (imgs, tgts) in enumerate(dl_ent):
-            imgs = [x.to(dev) for x in imgs]
-            tgts = [{k: v.to(dev) for k, v in t.items()} for t in tgts]
-            perdidas = modelo(imgs, tgts)
-            total = sum(perdidas.values())
-            opt.zero_grad()
-            total.backward()
+            imgs = [x.to(dev, non_blocking=True) for x in imgs]
+            tgts = [{k: v.to(dev, non_blocking=True) for k, v in t.items()} for t in tgts]
+            with torch.autocast(dev.type, enabled=amp):
+                perdidas = modelo(imgs, tgts)
+                total = sum(perdidas.values())
+            if not math.isfinite(total.item()):
+                print(f"perdida no finita en epoca {epoca} lote {i}: {perdidas}", flush=True)
+                return 1
+            opt.zero_grad(set_to_none=True)
+            escalador.scale(total).backward()
+            escalador.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(params, 10.0)
-            opt.step()
+            escalador.step(opt)
+            escalador.update()
+            plan.step()
             suma += total.item()
             n += 1
-            if i % 20 == 0:
+            if i % 50 == 0:
                 print(f"  epoca {epoca} lote {i}/{len(dl_ent)} perdida {total.item():.3f}", flush=True)
-        plan.step()
+        t_ent = time.perf_counter() - t0
 
         res = validar(modelo, dl_val, dev)
         dt = time.perf_counter() - t0
-        print(f"epoca {epoca}/{a.epocas}  perdida {suma/max(1,n):.3f}  {res}  [{dt/60:.1f} min]", flush=True)
+        memoria = torch.cuda.max_memory_allocated() / 2**30 if dev.type == "cuda" else 0.0
+        print(f"epoca {epoca}/{a.epocas}  perdida {suma / max(1, n):.3f}  {res}  "
+              f"[{dt / 60:.1f} min, {t_ent / max(1, n):.2f} s/paso, {memoria:.1f} GB]", flush=True)
 
         with historial.open("a") as f:
             f.write(json.dumps({
-                "epoca": epoca, "perdida": suma / max(1, n),
-                "cobertura": res.cobertura, "numeracion": res.numeracion,
-                "perfectas": res.perfectas, "minutos": dt / 60,
+                "epoca": epoca,
+                "perdida": suma / max(1, n),
+                **res.metricas(),
+                "minutos": dt / 60,
+                "segundos_por_paso": t_ent / max(1, n),
+                "memoria_gb": memoria,
             }) + "\n")
 
         torch.save(modelo.state_dict(), destino / "ultimo.pt")
-        if res.numeracion > mejor:
-            mejor = res.numeracion
+        if res.errores_por_radiografia < mejor:
+            mejor = res.errores_por_radiografia
             torch.save(modelo.state_dict(), destino / "mejor.pt")
-            print(f"  nuevo mejor: numeracion {mejor:.1%}", flush=True)
+            print(f"  nuevo mejor: {mejor:.2f} errores por radiografia", flush=True)
 
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

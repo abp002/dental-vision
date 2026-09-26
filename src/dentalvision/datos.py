@@ -7,6 +7,7 @@ tensor float [0,1] y un diccionario con `boxes` (xyxy), `labels` y `masks`.
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -21,6 +22,11 @@ FDI_A_CLASE = {f: i + 1 for i, f in enumerate(FDIS)}
 CLASE_A_FDI = {i + 1: f for i, f in enumerate(FDIS)}
 N_CLASES = len(FDIS) + 1
 
+# Resolución de trabajo (ancho en px). Es el tamaño al que torchvision llevaría
+# de todos modos una panorámica con su configuración por defecto; aquí se fija
+# explícitamente y el modelo se configura para no reescalar (ver modelo.py).
+ANCHO = 1333
+
 # Al voltear la imagen en horizontal, la derecha del paciente pasa a ser la
 # izquierda. Los cuadrantes 1 y 2 se intercambian, y el 3 con el 4.
 ESPEJO_CUADRANTE = {1: 2, 2: 1, 3: 4, 4: 3}
@@ -30,12 +36,43 @@ def fdi_espejado(fdi: int) -> int:
     return ESPEJO_CUADRANTE[fdi // 10] * 10 + fdi % 10
 
 
+def cargar_imagen(ruta: Path, ancho: int = ANCHO) -> tuple[Image.Image, float]:
+    """Radiografía en gris redimensionada a `ancho` px, y la escala aplicada."""
+    img = Image.open(ruta).convert("L")
+    escala = ancho / img.width
+    return img.resize((ancho, round(img.height * escala)), Image.BILINEAR), escala
+
+
+def a_tensor(img: Image.Image) -> torch.Tensor:
+    """Imagen en gris -> tensor float [0,1] de 3 canales (lo que espera el backbone)."""
+    gris = torch.from_numpy(np.asarray(img, dtype="float32") / 255.0)
+    return gris.unsqueeze(0).repeat(3, 1, 1)
+
+
+def voltear(
+    cajas: list[list[float]],
+    etiquetas: list[int],
+    poligonos: list[list[float]],
+    ancho: int,
+) -> tuple[list[list[float]], list[int], list[list[float]]]:
+    """Espejo horizontal de las anotaciones de una imagen de `ancho` px."""
+    cajas = [[ancho - x2, y1, ancho - x1, y2] for x1, y1, x2, y2 in cajas]
+    # El remapeo de cuadrantes es obligatorio: sin el, el modelo aprende
+    # que el mismo diente es a veces 16 y a veces 26.
+    etiquetas = [FDI_A_CLASE[fdi_espejado(CLASE_A_FDI[c])] for c in etiquetas]
+    poligonos = [
+        [ancho - v if j % 2 == 0 else v for j, v in enumerate(p)] for p in poligonos
+    ]
+    return cajas, etiquetas, poligonos
+
+
 class DientesDataset(Dataset):
     """Radiografías panorámicas con sus piezas anotadas.
 
     `ancho` redimensiona la imagen manteniendo la proporción: las panorámicas
-    originales rondan los 2.900 px y no caben en memoria de GPU a batch
-    razonable.
+    originales rondan los 2.900 px, y rasterizar ~28 máscaras a ese tamaño por
+    imagen es caro en CPU y en memoria. El modelo trabaja exactamente a este
+    ancho.
     """
 
     def __init__(
@@ -43,7 +80,7 @@ class DientesDataset(Dataset):
         sub: Subconjunto,
         radiografias: list[Radiografia],
         *,
-        ancho: int = 1024,
+        ancho: int = ANCHO,
         aumentar: bool = False,
         con_mascaras: bool = True,
     ):
@@ -58,11 +95,8 @@ class DientesDataset(Dataset):
 
     def __getitem__(self, i: int):
         r = self.items[i]
-        img = Image.open(self.sub.ruta(r)).convert("L")
-
-        escala = self.ancho / img.width
-        alto = round(img.height * escala)
-        img = img.resize((self.ancho, alto), Image.BILINEAR)
+        img, escala = cargar_imagen(self.sub.ruta(r), self.ancho)
+        alto = img.height
 
         cajas, etiquetas, poligonos = [], [], []
         for d in r.dientes:
@@ -73,27 +107,16 @@ class DientesDataset(Dataset):
             etiquetas.append(FDI_A_CLASE[d.fdi])
             poligonos.append([v * escala for v in d.poligono])
 
-        volteada = self.aumentar and random.random() < 0.5
-        if volteada:
+        if self.aumentar and random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            W = self.ancho
-            cajas = [[W - x2, y1, W - x1, y2] for x1, y1, x2, y2 in cajas]
-            # El remapeo de cuadrantes es obligatorio: sin el, el modelo aprende
-            # que el mismo diente es a veces 16 y a veces 26.
-            etiquetas = [FDI_A_CLASE[fdi_espejado(CLASE_A_FDI[c])] for c in etiquetas]
-            poligonos = [
-                [W - v if j % 2 == 0 else v for j, v in enumerate(p)] for p in poligonos
-            ]
+            cajas, etiquetas, poligonos = voltear(cajas, etiquetas, poligonos, self.ancho)
 
-        tensor = torch.from_numpy(
-            np.asarray(img, dtype="float32") / 255.0
-        )
+        tensor = a_tensor(img)
         if self.aumentar:
             # Variación de brillo y contraste: los equipos de rayos de distinta
             # marca producen exposiciones distintas, y el modelo debe aguantarlo.
             tensor = (tensor - 0.5) * random.uniform(0.85, 1.15) + 0.5
             tensor = (tensor + random.uniform(-0.08, 0.08)).clamp(0, 1)
-        tensor = tensor.unsqueeze(0).repeat(3, 1, 1)  # el backbone espera 3 canales
 
         objetivo = {
             "boxes": torch.tensor(cajas, dtype=torch.float32).reshape(-1, 4),
