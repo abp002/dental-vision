@@ -7,6 +7,8 @@ tensor float [0,1] y un diccionario con `boxes` (xyxy), `labels` y `masks`.
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -14,13 +16,46 @@ import torch
 from PIL import Image, ImageDraw
 from torch.utils.data import Dataset
 
-from .dentex import Radiografia, Subconjunto
+from .dentex import PATOLOGIAS, Diente, Radiografia, Subconjunto
 
 # 32 clases FDI. La 0 queda reservada al fondo, como exige torchvision.
 FDIS = [q * 10 + p for q in (1, 2, 3, 4) for p in range(1, 9)]
 FDI_A_CLASE = {f: i + 1 for i, f in enumerate(FDIS)}
 CLASE_A_FDI = {i + 1: f for i, f in enumerate(FDIS)}
 N_CLASES = len(FDIS) + 1
+
+# Segunda tarea: los 4 hallazgos de DENTEX, sobre la caja del diente afectado.
+PATOLOGIA_A_CLASE = {p: i + 1 for i, p in enumerate(PATOLOGIAS)}
+CLASE_A_PATOLOGIA = {i + 1: p for i, p in enumerate(PATOLOGIAS)}
+
+
+@dataclass(frozen=True)
+class Tarea:
+    """Qué se aprende de cada diente anotado: su número o su hallazgo."""
+
+    nombre: str
+    n_clases: int  # incluido el fondo
+    etiqueta: Callable[[Diente], int | None]
+    # Qué pasa con la etiqueta al voltear la imagen en horizontal.
+    espejo: Callable[[int], int]
+
+
+def _clase_fdi(d: Diente) -> int:
+    return FDI_A_CLASE[d.fdi]
+
+
+def _clase_patologia(d: Diente) -> int | None:
+    return PATOLOGIA_A_CLASE.get(d.patologia)
+
+
+def _espejo_fdi(clase: int) -> int:
+    return FDI_A_CLASE[fdi_espejado(CLASE_A_FDI[clase])]
+
+
+def _sin_cambio(clase: int) -> int:
+    # Una caries en el espejo sigue siendo una caries.
+    return clase
+
 
 # Resolución de trabajo (ancho en px). Es el tamaño al que torchvision llevaría
 # de todos modos una panorámica con su configuración por defecto; aquí se fija
@@ -36,9 +71,9 @@ def fdi_espejado(fdi: int) -> int:
     return ESPEJO_CUADRANTE[fdi // 10] * 10 + fdi % 10
 
 
-def cargar_imagen(ruta: Path, ancho: int = ANCHO) -> tuple[Image.Image, float]:
+def cargar_imagen(ruta: Path | Image.Image, ancho: int = ANCHO) -> tuple[Image.Image, float]:
     """Radiografía en gris redimensionada a `ancho` px, y la escala aplicada."""
-    img = Image.open(ruta).convert("L")
+    img = (ruta if isinstance(ruta, Image.Image) else Image.open(ruta)).convert("L")
     escala = ancho / img.width
     return img.resize((ancho, round(img.height * escala)), Image.BILINEAR), escala
 
@@ -54,12 +89,13 @@ def voltear(
     etiquetas: list[int],
     poligonos: list[list[float]],
     ancho: int,
+    espejo: Callable[[int], int] = _espejo_fdi,
 ) -> tuple[list[list[float]], list[int], list[list[float]]]:
     """Espejo horizontal de las anotaciones de una imagen de `ancho` px."""
     cajas = [[ancho - x2, y1, ancho - x1, y2] for x1, y1, x2, y2 in cajas]
-    # El remapeo de cuadrantes es obligatorio: sin el, el modelo aprende
-    # que el mismo diente es a veces 16 y a veces 26.
-    etiquetas = [FDI_A_CLASE[fdi_espejado(CLASE_A_FDI[c])] for c in etiquetas]
+    # En numeración el remapeo de cuadrantes es obligatorio: sin él, el modelo
+    # aprende que el mismo diente es a veces 16 y a veces 26.
+    etiquetas = [espejo(c) for c in etiquetas]
     poligonos = [
         [ancho - v if j % 2 == 0 else v for j, v in enumerate(p)] for p in poligonos
     ]
@@ -83,7 +119,9 @@ class DientesDataset(Dataset):
         ancho: int = ANCHO,
         aumentar: bool = False,
         con_mascaras: bool = True,
+        tarea: Tarea | None = None,
     ):
+        self.tarea = tarea or TAREAS["numeracion"]
         self.sub = sub
         self.items = radiografias
         self.ancho = ancho
@@ -100,16 +138,19 @@ class DientesDataset(Dataset):
 
         cajas, etiquetas, poligonos = [], [], []
         for d in r.dientes:
+            clase = self.tarea.etiqueta(d)
             x, y, w, h = (v * escala for v in d.bbox)
-            if w < 2 or h < 2:
-                continue  # caja degenerada: torchvision la rechazaria
+            if clase is None or w < 2 or h < 2:
+                continue  # sin etiqueta, o caja degenerada que torchvision rechazaría
             cajas.append([x, y, x + w, y + h])
-            etiquetas.append(FDI_A_CLASE[d.fdi])
+            etiquetas.append(clase)
             poligonos.append([v * escala for v in d.poligono])
 
         if self.aumentar and random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            cajas, etiquetas, poligonos = voltear(cajas, etiquetas, poligonos, self.ancho)
+            cajas, etiquetas, poligonos = voltear(
+                cajas, etiquetas, poligonos, self.ancho, self.tarea.espejo
+            )
 
         tensor = a_tensor(img)
         if self.aumentar:
@@ -143,3 +184,9 @@ class DientesDataset(Dataset):
 def colacion(lote):
     """Las imágenes de detección tienen distinto número de objetos: no se apilan."""
     return tuple(zip(*lote))
+
+
+TAREAS = {
+    "numeracion": Tarea("numeracion", N_CLASES, _clase_fdi, _espejo_fdi),
+    "patologia": Tarea("patologia", len(PATOLOGIAS) + 1, _clase_patologia, _sin_cambio),
+}

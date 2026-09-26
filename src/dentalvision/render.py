@@ -140,6 +140,20 @@ class Pieza:
     real: int | None = None
 
 
+ABREVIATURA = {"Caries": "C", "Deep Caries": "CP", "Periapical Lesion": "LP", "Impacted": "I"}
+COLOR_HALLAZGO = (255, 92, 92)
+
+
+@dataclass
+class Hallazgo:
+    """Un hallazgo predicho: caja, tipo y el diente al que se asigna."""
+
+    patologia: str  # nombre DENTEX: Caries, Deep Caries, Periapical Lesion, Impacted
+    caja: tuple[float, float, float, float]
+    confianza: float
+    fdi: int | None = None
+
+
 def _pintar_mascara(capa, mascara, color, grosor) -> None:
     m = Image.fromarray(mascara.astype(np.uint8) * 255, "L")
     capa.paste(Image.new("RGBA", capa.size, (*color, 46)), (0, 0), m)
@@ -152,6 +166,7 @@ def dibujar_prediccion(
     imagen: Image.Image,
     piezas: list[Pieza],
     *,
+    hallazgos: list[Hallazgo] = (),
     ancho_salida: int | None = 1600,
 ) -> Image.Image:
     """Radiografia con las piezas predichas: mascara y numero FDI.
@@ -180,6 +195,13 @@ def dibujar_prediccion(
         x1, y1, x2, y2 = p.caja
         _etiqueta(dib, ((x1 + x2) / 2, (y1 + y2) / 2), texto, color, fuente)
 
+    fuente_h = _fuente(max(14, base.width // 90))
+    for h in hallazgos:
+        x1, y1, x2, y2 = h.caja
+        dib.rectangle(h.caja, outline=(*COLOR_HALLAZGO, 255), width=grosor)
+        _etiqueta(dib, ((x1 + x2) / 2, y1 - fuente_h.size * 0.6), ABREVIATURA[h.patologia],
+                  COLOR_HALLAZGO, fuente_h)
+
     fusion = Image.alpha_composite(base.convert("RGBA"), capa).convert("RGB")
     if ancho_salida and fusion.width != ancho_salida:
         alto = round(fusion.height * ancho_salida / fusion.width)
@@ -191,6 +213,8 @@ def dibujar_odontograma(
     presentes: set[int],
     *,
     errores: set[int] = frozenset(),
+    ocultas: set[int] = frozenset(),
+    hallazgos: dict[int, list[str]] | None = None,
     ancho: int = 1600,
     titulo: str = "Odontograma",
 ) -> Image.Image:
@@ -213,10 +237,13 @@ def dibujar_odontograma(
     dib = ImageDraw.Draw(img)
     dib.text((margen, cabecera * 0.3), titulo, font=fuente_titulo, fill=(235, 237, 240))
 
-    leyenda = [("presente", COLOR_CUADRANTE[1], None), ("ausente", (44, 48, 56), None),
-               ("no coincide con la anotación", (44, 48, 56), COLOR_ERROR)]
+    leyenda = [("presente", COLOR_CUADRANTE[1], None), ("ausente", (44, 48, 56), None)]
+    if hallazgos:
+        leyenda.append(("hallazgo (C caries, CP profunda, LP lesión, I impactado)", COLOR_HALLAZGO, None))
+    if errores:
+        leyenda.append(("no coincide con la anotación", (44, 48, 56), COLOR_ERROR))
     x = ancho - margen
-    for texto, relleno, borde in reversed(leyenda if errores else leyenda[:2]):
+    for texto, relleno, borde in reversed(leyenda):
         w = dib.textlength(texto, font=fuente_titulo)
         x -= w
         dib.text((x, cabecera * 0.3), texto, font=fuente_titulo, fill=(170, 175, 185))
@@ -234,6 +261,10 @@ def dibujar_odontograma(
             presente = fdi in presentes
             relleno = COLOR_CUADRANTE[fdi // 10] if presente else (44, 48, 56)
             dib.rounded_rectangle(caja, radius=round(celda * 0.12), fill=relleno)
+            if fdi in ocultas:
+                # Casilla aún sin decidir (animación): ni presente ni tachada.
+                dib.rounded_rectangle(caja, radius=round(celda * 0.12), fill=(28, 31, 38))
+                continue
             if not presente:
                 dib.line((x + celda * 0.2, y + alto_celda * 0.8, x + celda * 0.8, y + alto_celda * 0.2),
                          fill=(80, 86, 96), width=max(2, hueco // 2))
@@ -244,6 +275,14 @@ def dibujar_odontograma(
             izq, arr, der, aba = dib.textbbox((0, 0), texto, font=fuente)
             dib.text((x + (celda - (der - izq)) / 2 - izq, y + (alto_celda - (aba - arr)) / 2 - arr),
                      texto, font=fuente, fill=COLOR_FONDO if presente else (120, 126, 136))
+            if hallazgos and hallazgos.get(fdi):
+                marca = " ".join(ABREVIATURA[h] for h in sorted(set(hallazgos[fdi])))
+                fuente_m = _fuente(round(celda * 0.2))
+                w = dib.textlength(marca, font=fuente_m) + celda * 0.12
+                caja_m = (x + celda - w - 3, y + 3, x + celda - 3, y + 3 + fuente_m.size * 1.3)
+                dib.rounded_rectangle(caja_m, radius=4, fill=COLOR_HALLAZGO)
+                dib.text(((caja_m[0] + caja_m[2]) / 2, (caja_m[1] + caja_m[3]) / 2), marca,
+                         font=fuente_m, fill=(255, 255, 255), anchor="mm")
     return img
 
 

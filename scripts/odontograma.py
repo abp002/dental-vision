@@ -11,18 +11,15 @@ los fallos se marcan en rojo.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 import torch
 
-from dentalvision.datos import CLASE_A_FDI, a_tensor, cargar_imagen
 from dentalvision.dentex import Subconjunto
 from dentalvision.evaluacion import emparejar
-from dentalvision.modelo import cargar, dispositivo
+from dentalvision.inferencia import Odontografo
 from dentalvision.particiones import particionar
-from dentalvision.postproceso import postprocesar
 from dentalvision.render import Pieza, apilar, dibujar_odontograma, dibujar_prediccion
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -37,6 +34,7 @@ def argumentos():
     p.add_argument("--indice", type=int, default=0, help="radiografía dentro de la partición")
     p.add_argument("--fichero", help="radiografía de la partición por nombre de fichero")
     p.add_argument("--salida", help="PNG de salida (por defecto en salidas/)")
+    p.add_argument("--patologia", help="modelo de hallazgos en modelos/ (opcional)")
     return p.parse_args()
 
 
@@ -70,10 +68,10 @@ def comparar(final: dict, piezas: list[Pieza], radiografia, escala: float) -> se
 
 def main() -> int:
     a = argumentos()
-    carpeta = RAIZ / "modelos" / a.ejecucion
-    dev = dispositivo()
-    modelo, config = cargar(carpeta, dev=dev)
-    ajustes = json.loads((carpeta / "postproceso.json").read_text())["orden"]
+    odontografo = Odontografo(
+        RAIZ / "modelos" / a.ejecucion,
+        patologia=RAIZ / "modelos" / a.patologia if a.patologia else None,
+    )
 
     radiografia = None
     if a.imagen:
@@ -87,16 +85,8 @@ def main() -> int:
             radiografia = particion[a.indice]
         ruta = sub.ruta(radiografia)
 
-    img, escala = cargar_imagen(ruta, config["ancho"])
-    with torch.no_grad():
-        salida = {k: v.cpu() for k, v in modelo([a_tensor(img).to(dev)])[0].items()}
-    final = postprocesar(salida, "orden", umbral=ajustes["umbral"], kappa=ajustes["kappa"])
-    mascaras = salida["masks"][final["indices"], 0] > 0.5
-
-    piezas = [
-        Pieza(fdi=CLASE_A_FDI[int(c)], caja=tuple(b.tolist()), mascara=m.numpy())
-        for c, b, m in zip(final["labels"], final["boxes"], mascaras)
-    ]
+    pred = odontografo.predecir(ruta)
+    img, escala, piezas, final = pred.imagen, pred.escala, pred.piezas, pred.final
     errores: set[int] = set()
     if radiografia is not None:
         errores = comparar(final, piezas, radiografia, escala)
@@ -107,8 +97,9 @@ def main() -> int:
 
     presentes = {p.fdi for p in piezas if p.estado != "falta"}
     figura = apilar(
-        dibujar_prediccion(img, piezas),
-        dibujar_odontograma(presentes, errores=errores, titulo="Odontograma generado"),
+        dibujar_prediccion(img, piezas, hallazgos=pred.hallazgos),
+        dibujar_odontograma(presentes, errores=errores, hallazgos=pred.por_diente(),
+                            titulo="Odontograma generado"),
     )
     destino = Path(a.salida) if a.salida else RAIZ / "salidas" / f"odontograma_{ruta.stem}.png"
     destino.parent.mkdir(parents=True, exist_ok=True)

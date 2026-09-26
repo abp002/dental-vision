@@ -211,3 +211,106 @@ def intervalo_diferencia(
     diferencias.sort()
     cola = (1 - confianza) / 2
     return diferencias[int(cola * repeticiones)], diferencias[int((1 - cola) * repeticiones) - 1]
+
+
+# --- Hallazgos (patología) ---------------------------------------------------
+
+
+def ap_coco(
+    predicciones: list[dict], verdades: list[dict], clases: dict[int, str]
+) -> dict[str, float]:
+    """AP al estilo COCO, la métrica oficial del concurso DENTEX.
+
+    Devuelve AP (IoU 0,50:0,95), AP50, AP75 y AR100 globales, y el AP de cada
+    clase. Las cajas deben estar en la misma escala en predicción y verdad.
+    """
+    import contextlib
+    import io
+
+    import numpy as np
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
+
+    imagenes, anotaciones, detecciones = [], [], []
+    for i, (p, v) in enumerate(zip(predicciones, verdades, strict=True)):
+        imagenes.append({"id": i})
+        for caja, clase in zip(v["boxes"].tolist(), v["labels"].tolist()):
+            x1, y1, x2, y2 = caja
+            anotaciones.append({
+                "id": len(anotaciones) + 1, "image_id": i, "category_id": clase,
+                "bbox": [x1, y1, x2 - x1, y2 - y1], "area": (x2 - x1) * (y2 - y1), "iscrowd": 0,
+            })
+        for caja, clase, score in zip(p["boxes"].tolist(), p["labels"].tolist(), p["scores"].tolist()):
+            x1, y1, x2, y2 = caja
+            detecciones.append({
+                "image_id": i, "category_id": clase,
+                "bbox": [x1, y1, x2 - x1, y2 - y1], "score": score,
+            })
+
+    silencio = contextlib.redirect_stdout(io.StringIO())
+    with silencio:
+        gt = COCO()
+        gt.dataset = {"images": imagenes, "annotations": anotaciones,
+                      "categories": [{"id": k, "name": n} for k, n in clases.items()]}
+        gt.createIndex()
+        dt = gt.loadRes(detecciones) if detecciones else COCO()
+        ev = COCOeval(gt, dt, "bbox")
+        ev.evaluate()
+        ev.accumulate()
+        ev.summarize()
+
+    resultado = {k: float(ev.stats[i]) for k, i in (("AP", 0), ("AP50", 1), ("AP75", 2), ("AR100", 8))}
+    precision = ev.eval["precision"]  # [iou, recall, clase, área, maxdets]
+    for k, (id_clase, nombre) in enumerate(clases.items()):
+        p = precision[:, :, k, 0, -1]
+        resultado[f"AP {nombre}"] = float(np.mean(p[p > -1])) if (p > -1).any() else float("nan")
+    return resultado
+
+
+@dataclass
+class Hallazgos:
+    """Aciertos y fallos de un tipo de hallazgo, con un umbral de confianza."""
+
+    reales: int = 0
+    encontrados: int = 0  # reales con una predicción de su clase encima
+    falsas_alarmas: int = 0
+    radiografias: int = 0
+
+    def __add__(self, otro: Hallazgos) -> Hallazgos:
+        return Hallazgos(*(a + b for a, b in zip(asdict(self).values(), asdict(otro).values())))
+
+    @property
+    def sensibilidad(self) -> float:
+        return self.encontrados / max(1, self.reales)
+
+    @property
+    def precision(self) -> float:
+        return self.encontrados / max(1, self.encontrados + self.falsas_alarmas)
+
+    @property
+    def falsas_por_radiografia(self) -> float:
+        return self.falsas_alarmas / max(1, self.radiografias)
+
+
+def hallazgos_por_clase(
+    predicciones: list[dict],
+    verdades: list[dict],
+    clases: dict[int, str],
+    *,
+    umbral_score: float = 0.5,
+    umbral_iou: float = 0.5,
+) -> dict[str, list[Hallazgos]]:
+    """Por clase, una lista con el resultado de cada radiografía (para bootstrap)."""
+    salida: dict[str, list[Hallazgos]] = {n: [] for n in clases.values()}
+    for p, v in zip(predicciones, verdades, strict=True):
+        for clase, nombre in clases.items():
+            mp = (p["labels"] == clase) & (p["scores"] >= umbral_score)
+            orden = torch.argsort(p["scores"][mp], descending=True)
+            cajas_p = p["boxes"][mp][orden].cpu()
+            cajas_r = v["boxes"][v["labels"] == clase].cpu()
+            pares = emparejar(cajas_p, cajas_r, umbral_iou)
+            salida[nombre].append(Hallazgos(
+                reales=len(cajas_r), encontrados=len(pares),
+                falsas_alarmas=len(cajas_p) - len(pares), radiografias=1,
+            ))
+    return salida

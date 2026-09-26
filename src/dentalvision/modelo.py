@@ -130,7 +130,10 @@ def sin_mascaras(modelo):
 def cargar(carpeta: Path, cual: str = "mejor", dev: torch.device | None = None):
     """Reconstruye un modelo entrenado a partir de su carpeta en modelos/."""
     config = json.loads((carpeta / "config.json").read_text())
+    from .datos import TAREAS
+
     modelo = crear(
+        TAREAS[config.get("tarea", "numeracion")].n_clases,
         preentrenado=False,
         ancho=config["ancho"],
         rois=config["rois"],

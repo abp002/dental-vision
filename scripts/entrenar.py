@@ -22,11 +22,16 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dentalvision.datos import ANCHO, DientesDataset, colacion
-from dentalvision.dentex import Subconjunto
-from dentalvision.evaluacion import evaluar
+from dentalvision.datos import (
+    ANCHO,
+    CLASE_A_PATOLOGIA,
+    TAREAS,
+    DientesDataset,
+    colacion,
+)
+from dentalvision.evaluacion import ap_coco, evaluar
 from dentalvision.modelo import crear, dispositivo, sin_mascaras
-from dentalvision.particiones import particionar
+from dentalvision.particiones import particion_de
 
 RAIZ = Path(__file__).resolve().parents[1]
 
@@ -34,6 +39,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 def argumentos():
     p = argparse.ArgumentParser()
     p.add_argument("--nombre", default=time.strftime("%Y%m%d-%H%M%S"))
+    p.add_argument("--tarea", choices=sorted(TAREAS), default="numeracion")
     p.add_argument("--epocas", type=int, default=24)
     p.add_argument("--ancho", type=int, default=ANCHO)
     p.add_argument("--lote", type=int, default=2)
@@ -60,7 +66,8 @@ def fijar_semilla(semilla: int) -> None:
 
 
 @torch.no_grad()
-def validar(modelo, cargador, dev):
+def validar(modelo, cargador, dev, tarea: str) -> tuple[dict, float, str]:
+    """Métricas de validación, puntuación a maximizar y resumen legible."""
     modelo.eval()
     preds, reales = [], []
     with sin_mascaras(modelo):
@@ -69,7 +76,11 @@ def validar(modelo, cargador, dev):
             # A CPU en cuanto salen: acumularlas en la GPU la llena sin necesidad.
             preds.extend({k: v.cpu() for k, v in s.items()} for s in salida)
             reales.extend(tgts)
-    return evaluar(preds, reales)
+    if tarea == "numeracion":
+        res = evaluar(preds, reales)
+        return res.metricas(), -res.errores_por_radiografia, str(res)
+    m = ap_coco(preds, reales, CLASE_A_PATOLOGIA)
+    return m, m["AP"], "  ".join(f"{k} {v:.3f}" for k, v in m.items())
 
 
 def main() -> int:
@@ -78,8 +89,8 @@ def main() -> int:
     amp = dev.type == "cuda" and not a.sin_amp
     fijar_semilla(a.semilla)
 
-    sub = Subconjunto("enumeracion")
-    part = particionar(sub)
+    tarea = TAREAS[a.tarea]
+    sub, part = particion_de(a.tarea)
     ent, val = part.entrenamiento, part.validacion
     if a.limite:
         ent, val = ent[: a.limite], val[: max(2, a.limite // 4)]
@@ -92,8 +103,8 @@ def main() -> int:
     print(f"dispositivo: {dev}  amp: {amp}  entrenamiento: {len(ent)}  "
           f"validacion: {len(val)}  -> {destino}", flush=True)
 
-    ds_ent = DientesDataset(sub, ent, ancho=a.ancho, aumentar=True)
-    ds_val = DientesDataset(sub, val, ancho=a.ancho, con_mascaras=False)
+    ds_ent = DientesDataset(sub, ent, ancho=a.ancho, aumentar=True, tarea=tarea)
+    ds_val = DientesDataset(sub, val, ancho=a.ancho, con_mascaras=False, tarea=tarea)
     comunes = dict(
         batch_size=a.lote,
         collate_fn=colacion,
@@ -104,7 +115,7 @@ def main() -> int:
     dl_ent = DataLoader(ds_ent, shuffle=True, **comunes)
     dl_val = DataLoader(ds_val, shuffle=False, **comunes)
 
-    modelo = crear(ancho=a.ancho, rois=a.rois, congelar_bn=a.congelar_bn).to(dev)
+    modelo = crear(tarea.n_clases, ancho=a.ancho, rois=a.rois, congelar_bn=a.congelar_bn).to(dev)
     params = [p for p in modelo.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=1e-4)
 
@@ -120,7 +131,7 @@ def main() -> int:
 
     plan = torch.optim.lr_scheduler.LambdaLR(opt, factor)
     escalador = torch.amp.GradScaler("cuda", enabled=amp)
-    mejor = math.inf
+    mejor = -math.inf
 
     for epoca in range(1, a.epocas + 1):
         modelo.train()
@@ -149,27 +160,27 @@ def main() -> int:
                 print(f"  epoca {epoca} lote {i}/{len(dl_ent)} perdida {total.item():.3f}", flush=True)
         t_ent = time.perf_counter() - t0
 
-        res = validar(modelo, dl_val, dev)
+        metricas, puntuacion, resumen = validar(modelo, dl_val, dev, a.tarea)
         dt = time.perf_counter() - t0
         memoria = torch.cuda.max_memory_allocated() / 2**30 if dev.type == "cuda" else 0.0
-        print(f"epoca {epoca}/{a.epocas}  perdida {suma / max(1, n):.3f}  {res}  "
+        print(f"epoca {epoca}/{a.epocas}  perdida {suma / max(1, n):.3f}  {resumen}  "
               f"[{dt / 60:.1f} min, {t_ent / max(1, n):.2f} s/paso, {memoria:.1f} GB]", flush=True)
 
         with historial.open("a") as f:
             f.write(json.dumps({
                 "epoca": epoca,
                 "perdida": suma / max(1, n),
-                **res.metricas(),
+                **metricas,
                 "minutos": dt / 60,
                 "segundos_por_paso": t_ent / max(1, n),
                 "memoria_gb": memoria,
             }) + "\n")
 
         torch.save(modelo.state_dict(), destino / "ultimo.pt")
-        if res.errores_por_radiografia < mejor:
-            mejor = res.errores_por_radiografia
+        if puntuacion > mejor:
+            mejor = puntuacion
             torch.save(modelo.state_dict(), destino / "mejor.pt")
-            print(f"  nuevo mejor: {mejor:.2f} errores por radiografia", flush=True)
+            print(f"  nuevo mejor: {resumen}", flush=True)
 
     return 0
 
