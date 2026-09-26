@@ -49,6 +49,14 @@ NOMBRE_CUADRANTE = {
     4: "inferior derecho",
 }
 
+# Orden de las piezas en cada arcada tal como aparecen en la radiografia, de
+# izquierda a derecha: primero el lado derecho del paciente, del cordal al
+# incisivo central, y despues el izquierdo, del incisivo central al cordal.
+ARCADAS = {
+    "superior": [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28],
+    "inferior": [48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38],
+}
+
 
 @dataclass(frozen=True)
 class Diente:
