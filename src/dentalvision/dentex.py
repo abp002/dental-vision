@@ -17,15 +17,33 @@ deduce de DONDE esta el diente en la imagen, la posicion de COMO es su forma.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[2]
-DENTEX = RAIZ / "data" / "dentex" / "training_data"
+DATOS = RAIZ / "data" / "dentex"
 
 PATOLOGIAS = ["Impacted", "Caries", "Periapical Lesion", "Deep Caries"]
+NOMBRE_PATOLOGIA = {
+    "Impacted": "impactado",
+    "Caries": "caries",
+    "Periapical Lesion": "lesión periapical",
+    "Deep Caries": "caries profunda",
+}
+
+# La prueba oficial del concurso se publicó con las etiquetas clínicas
+# originales (LabelMe, en turco), no con las 4 clases de DENTEX. Solo se
+# traducen las que no admiten duda. "kanal" (endodoncia) y "küretaj" (curetaje)
+# no tienen equivalente claro entre las 4 clases, y sano, extracción y
+# fractura no son clases de DENTEX: se descartan.
+TRADUCCION_PRUEBA = {
+    "çürük": "Caries",
+    "gömülü": "Impacted",
+    "lezyon": "Periapical Lesion",
+}
 
 # Nombre clinico por posicion FDI (1..8), del centro hacia atras.
 NOMBRE_POSICION = {
@@ -105,23 +123,35 @@ class Radiografia:
 
 
 class Subconjunto:
-    """Uno de los tres subconjuntos de DENTEX."""
+    """Un subconjunto de DENTEX: los dos etiquetados de entrenamiento y los dos
+    conjuntos oficiales del concurso (validación y prueba)."""
 
+    # nombre -> (carpeta de imágenes, anotaciones), relativas a data/dentex
     CARPETAS = {
-        "enumeracion": ("quadrant_enumeration", "train_quadrant_enumeration.json"),
-        "patologia": (
-            "quadrant-enumeration-disease",
-            "train_quadrant_enumeration_disease.json",
+        "enumeracion": (
+            "training_data/quadrant_enumeration/xrays",
+            "training_data/quadrant_enumeration/train_quadrant_enumeration.json",
         ),
+        "patologia": (
+            "training_data/quadrant-enumeration-disease/xrays",
+            "training_data/quadrant-enumeration-disease/train_quadrant_enumeration_disease.json",
+        ),
+        "validacion_oficial": (
+            "validation_data/quadrant_enumeration_disease/xrays",
+            "validation_triple.json",
+        ),
+        # Una anotación LabelMe por imagen, en esta carpeta.
+        "prueba_oficial": ("test_data/disease/input", "test_data/disease/label"),
     }
 
-    def __init__(self, nombre: str, raiz: Path = DENTEX):
+    def __init__(self, nombre: str, raiz: Path = DATOS):
         if nombre not in self.CARPETAS:
             raise ValueError(f"Subconjunto desconocido: {nombre}")
-        carpeta, fichero = self.CARPETAS[nombre]
+        imagenes, anotaciones = self.CARPETAS[nombre]
         self.nombre = nombre
-        self.dir_imagenes = raiz / carpeta / "xrays"
-        self.ruta_json = raiz / carpeta / fichero
+        self.dir_imagenes = raiz / imagenes
+        self.ruta_json = raiz / anotaciones
+        self._huellas: dict[str, str] = {}
         if not self.ruta_json.exists():
             raise FileNotFoundError(
                 f"No encuentro {self.ruta_json}. Descomprime el dataset primero."
@@ -133,6 +163,8 @@ class Subconjunto:
 
     @cached_property
     def radiografias(self) -> list[Radiografia]:
+        if self.nombre == "prueba_oficial":
+            return self._labelme()
         por_imagen: dict[int, list[Diente]] = {}
         for a in self._bruto["annotations"]:
             pat = None
@@ -163,8 +195,41 @@ class Subconjunto:
             )
         return salida
 
+    def _labelme(self) -> list[Radiografia]:
+        salida = []
+        for i, f in enumerate(sorted(self.ruta_json.glob("*.json"))):
+            datos = json.loads(f.read_text())
+            dientes = []
+            for forma in datos["shapes"]:
+                _, clase, fdi = forma["label"].split("-")
+                if clase not in TRADUCCION_PRUEBA:
+                    continue
+                xs = [x for x, _ in forma["points"]]
+                ys = [y for _, y in forma["points"]]
+                dientes.append(Diente(
+                    cuadrante=int(fdi) // 10,
+                    posicion=int(fdi) % 10,
+                    bbox=(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)),
+                    poligono=[v for punto in forma["points"] for v in punto],
+                    patologia=TRADUCCION_PRUEBA[clase],
+                ))
+            salida.append(Radiografia(
+                id=i,
+                fichero=f.with_suffix(".png").name,
+                ancho=datos["imageWidth"],
+                alto=datos["imageHeight"],
+                dientes=dientes,
+            ))
+        return salida
+
     def ruta(self, r: Radiografia) -> Path:
         return self.dir_imagenes / r.fichero
+
+    def huella(self, r: Radiografia) -> str:
+        """MD5 del fichero: identifica copias exactas con distinto nombre."""
+        if r.fichero not in self._huellas:
+            self._huellas[r.fichero] = hashlib.md5(self.ruta(r).read_bytes()).hexdigest()
+        return self._huellas[r.fichero]
 
     def __len__(self) -> int:
         return len(self.radiografias)

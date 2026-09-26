@@ -8,12 +8,19 @@ hay que leer cualquier metrica posterior.
    modelo a predecir dos veces el mismo diente; evaluar con ellas hace imposible
    saber si un fallo es del modelo o de la etiqueta.
 
-2. LA PARTICION ES POR IMAGEN.
+2. LA PARTICION ES POR IMAGEN, SIN DUPLICADOS.
    Lo correcto en imagen medica es separar por PACIENTE: si dos radiografias de
    la misma boca caen una en entrenamiento y otra en prueba, el modelo ya ha
    visto ese caso y las metricas salen infladas. DENTEX no publica identificador
    de paciente, asi que asumimos una imagen por paciente. Es un supuesto, no un
    hecho, y queda escrito aqui.
+
+   Lo que si se puede comprobar es la copia exacta: DENTEX repite algunas
+   radiografias con distinto nombre de fichero (11 de las 634 de enumeracion).
+   De cada grupo de copias identicas se queda la primera por nombre y el resto
+   se excluye. Sin esto, una radiografia de prueba estaba tambien en
+   entrenamiento. `excluir` permite ademas apartar imagenes que se usan como
+   prueba en otro sitio (los conjuntos oficiales del concurso).
 
 3. LA SEMILLA ES FIJA.
    Misma particion en cada ejecucion. Sin esto, comparar dos entrenamientos no
@@ -54,9 +61,16 @@ def particionar(
     prueba: float = 0.15,
     semilla: int = SEMILLA,
     excluir_corruptas: bool = True,
+    excluir: frozenset[str] = frozenset(),
 ) -> Particion:
     limpias, fuera = [], []
-    for r in sub.radiografias:
+    vistas: set[str] = set(excluir)
+    for r in sorted(sub.radiografias, key=lambda r: r.fichero):
+        huella = sub.huella(r)
+        if huella in vistas:
+            fuera.append(r)  # copia exacta de otra radiografia
+            continue
+        vistas.add(huella)
         if excluir_corruptas and r.duplicados:
             fuera.append(r)
         elif not r.dientes:
@@ -66,6 +80,7 @@ def particionar(
 
     # Ordenar antes de barajar: el orden de lectura del JSON no esta garantizado
     # entre versiones, y sin esto la semilla no reproduce la misma particion.
+    # (Ya vienen ordenadas del bucle; se deja explicito.)
     limpias.sort(key=lambda r: r.fichero)
     random.Random(semilla).shuffle(limpias)
 
@@ -78,3 +93,28 @@ def particionar(
         prueba=limpias[n_val : n_val + n_pru],
         excluidas=fuera,
     )
+
+
+OFICIALES = ("validacion_oficial", "prueba_oficial")
+
+
+def particion_de(tarea: str) -> tuple[Subconjunto, Particion]:
+    """Subconjunto y partición de cada tarea.
+
+    Numeración: 70/15/15 sobre el subconjunto de enumeración.
+    Patología: 85/15 sobre el de patología, sin prueba propia, porque la prueba
+    son los conjuntos oficiales del concurso; por eso se apartan las copias de
+    esos conjuntos que aparecen entre las imágenes de entrenamiento.
+    """
+    if tarea == "numeracion":
+        sub = Subconjunto("enumeracion")
+        return sub, particionar(sub)
+    if tarea == "patologia":
+        sub = Subconjunto("patologia")
+        oficiales = frozenset(
+            s.huella(r) for s in map(Subconjunto, OFICIALES) for r in s.radiografias
+        )
+        return sub, particionar(
+            sub, val=0.15, prueba=0.0, excluir_corruptas=False, excluir=oficiales
+        )
+    raise ValueError(f"Tarea desconocida: {tarea}")
