@@ -5,6 +5,10 @@ data/
 salidas/
 runs/
 
+# Demo web: lo que se sube a Hugging Face (pesos incluidos) y la cache de Gradio
+publicar/
+.gradio/
+
 # Modelos entrenados
 modelos/
 *.pt

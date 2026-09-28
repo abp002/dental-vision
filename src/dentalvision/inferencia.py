@@ -50,7 +50,10 @@ class Odontografo:
             self.umbral_patologia = json.loads((patologia / "umbral.json").read_text())["umbral"]
 
     @torch.no_grad()
-    def predecir(self, imagen: Path | Image.Image) -> Prediccion:
+    def predecir(self, imagen: Path | Image.Image, umbral_hallazgos: float | None = None) -> Prediccion:
+        """`umbral_hallazgos` sustituye al elegido en validación (umbral.json).
+        La demo web pide los hallazgos desde un umbral bajo y filtra al dibujar,
+        para mover el umbral sin volver a pasar por el modelo."""
         img, escala = cargar_imagen(imagen, self.config["ancho"])
         salida = {k: v.cpu() for k, v in self.modelo([a_tensor(img).to(self.dev)])[0].items()}
         final = postprocesar(
@@ -61,13 +64,16 @@ class Odontografo:
             Pieza(fdi=CLASE_A_FDI[int(c)], caja=tuple(b.tolist()), mascara=m.numpy())
             for c, b, m in zip(final["labels"], final["boxes"], mascaras)
         ]
-        hallazgos = self._hallazgos(img, piezas) if self.patologia is not None else []
+        hallazgos = []
+        if self.patologia is not None:
+            umbral = self.umbral_patologia if umbral_hallazgos is None else umbral_hallazgos
+            hallazgos = self._hallazgos(img, piezas, umbral)
         return Prediccion(img, escala, piezas, final, hallazgos)
 
-    def _hallazgos(self, img: Image.Image, piezas: list[Pieza]) -> list[Hallazgo]:
+    def _hallazgos(self, img: Image.Image, piezas: list[Pieza], umbral: float) -> list[Hallazgo]:
         with sin_mascaras(self.patologia):
             p = {k: v.cpu() for k, v in self.patologia([a_tensor(img).to(self.dev)])[0].items()}
-        keep = p["scores"] >= self.umbral_patologia
+        keep = p["scores"] >= umbral
         cajas, clases, scores = p["boxes"][keep], p["labels"][keep], p["scores"][keep]
         salida = []
         dientes = torch.tensor([pz.caja for pz in piezas]).reshape(-1, 4)

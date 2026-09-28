@@ -37,7 +37,7 @@ def cargar_ejecucion(nombre: str):
     salida = [postprocesar(p, "orden", umbral=ajustes["umbral"], kappa=ajustes["kappa"])
               for p in cache["preds"]]
     por_rx = evaluar_por_radiografia(salida, cache["reales"], umbral_score=0.0)
-    historial = [json.loads(l) for l in (carpeta / "historial.jsonl").read_text().splitlines()]
+    historial = [json.loads(linea) for linea in (carpeta / "historial.jsonl").read_text().splitlines()]
     return {
         "ficheros": cache["ficheros"],
         "por_rx": por_rx,

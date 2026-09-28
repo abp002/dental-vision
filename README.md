@@ -209,6 +209,16 @@ uv run python scripts/animacion.py --ejecucion base --patologia patologia --imag
 uv run pytest
 ```
 
+La demo web, en local:
+
+```sh
+uv run --group demo python scripts/publicar.py     # pesos en safetensors y Space en publicar/
+DENTALVISION_PESOS=publicar/modelo uv run --group demo python demo/app.py
+```
+
+Sin `DENTALVISION_PESOS`, la demo descarga los pesos publicados en Hugging Face,
+así que basta con clonar el repositorio para probarla.
+
 ## Estructura
 
 ```
@@ -229,6 +239,12 @@ scripts/
   evaluar_patologia.py  hallazgos en los conjuntos oficiales del concurso
   odontograma.py  figura de una radiografía con su odontograma
   animacion.py    GIF o vídeo del proceso
+  publicar.py     pesos en safetensors, montaje del Space y subida a Hugging Face
+demo/
+  app.py          demo web (Gradio): la aplicación del Space
+  ejemplos/       las radiografías de las figuras, a la resolución de trabajo
+  modelo.md       ficha del modelo en Hugging Face
+  space.md        ficha del Space
 tests/
 ```
 

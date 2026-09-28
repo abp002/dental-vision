@@ -2,7 +2,7 @@
 orden de arcada y el odontograma rellenándose a la vez.
 
 Uso:
-    uv run python scripts/animacion.py --ejecucion base --fichero train_514.png --salida docs/demo.gif
+    uv run python scripts/animacion.py --ejecucion base --patologia patologia --fichero train_422.png --salida docs/demo.gif
     uv run python scripts/animacion.py --ejecucion base --imagen panoramica.png --salida demo.mp4
 
 La extensión decide el formato: .gif, o .mp4 (necesita ffmpeg).

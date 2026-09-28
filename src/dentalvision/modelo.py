@@ -128,7 +128,9 @@ def sin_mascaras(modelo):
 
 
 def cargar(carpeta: Path, cual: str = "mejor", dev: torch.device | None = None):
-    """Reconstruye un modelo entrenado a partir de su carpeta en modelos/."""
+    """Reconstruye un modelo entrenado a partir de su carpeta en modelos/, o de
+    su versión publicada, que trae los pesos en safetensors en lugar de .pt
+    (ver scripts/publicar.py)."""
     config = json.loads((carpeta / "config.json").read_text())
     from .datos import TAREAS
 
@@ -139,6 +141,12 @@ def cargar(carpeta: Path, cual: str = "mejor", dev: torch.device | None = None):
         rois=config["rois"],
         congelar_bn=config["congelar_bn"],
     )
-    estado = torch.load(carpeta / f"{cual}.pt", map_location="cpu", weights_only=True)
+    publicado = carpeta / f"{cual}.safetensors"
+    if publicado.exists():
+        from safetensors.torch import load_file
+
+        estado = load_file(publicado)
+    else:
+        estado = torch.load(carpeta / f"{cual}.pt", map_location="cpu", weights_only=True)
     modelo.load_state_dict(estado)
     return modelo.to(dev or dispositivo()).eval(), config

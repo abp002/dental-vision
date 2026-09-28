@@ -1,0 +1,10 @@
+# Dependencias del Space. Gradio lo instala Hugging Face (sdk_version en la ficha).
+# El Space gratuito no tiene GPU: ruedas de PyTorch para CPU, que se ahorran los
+# ~3 GB de bibliotecas CUDA que traen las de PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+numpy==2.5.1
+pillow==12.3.0
+safetensors==0.8.0
+scipy==1.18.1
