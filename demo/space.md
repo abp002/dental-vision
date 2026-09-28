@@ -10,9 +10,9 @@ app_file: app.py
 license: mit
 short_description: Odontograma automático desde una radiografía panorámica
 models:
-  - abp002/dental-vision
+  - abp0040/dental-vision
 preload_from_hub:
-  - abp002/dental-vision
+  - abp0040/dental-vision
 datasets:
   - ibrahimhamamci/DENTEX
 tags:
@@ -31,7 +31,7 @@ resultado en JSON.
 **Proyecto de investigación, no apto para uso clínico.**
 
 - Código, evaluación y decisiones técnicas: [GitHub](https://github.com/abp002/dental-vision)
-- Pesos y ficha del modelo: [abp002/dental-vision](https://huggingface.co/abp002/dental-vision)
+- Pesos y ficha del modelo: [abp0040/dental-vision](https://huggingface.co/abp0040/dental-vision)
 
 Las radiografías de ejemplo proceden de [DENTEX 2023](https://zenodo.org/records/7812323)
 (Hamamci et al., CC BY 4.0). El código es MIT.

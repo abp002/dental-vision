@@ -17,7 +17,7 @@ datasets:
 Pesos de los dos modelos de [dental-vision](https://github.com/abp002/dental-vision):
 numeración de las piezas dentales en notación FDI y detección de hallazgos en
 radiografías panorámicas. Se pueden probar en la
-[demo](https://huggingface.co/spaces/abp002/dental-vision).
+[demo](https://huggingface.co/spaces/abp0040/dental-vision).
 
 **No apto para uso clínico.** Es un proyecto de investigación y aprendizaje. En
 la UE, un uso clínico real sería un producto sanitario (MDR 2017/745).
@@ -44,7 +44,7 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 from dentalvision.inferencia import Odontografo  # pip install git+https://github.com/abp002/dental-vision
 
-pesos = Path(snapshot_download("abp002/dental-vision"))
+pesos = Path(snapshot_download("abp0040/dental-vision"))
 modelo = Odontografo(pesos / "numeracion", patologia=pesos / "patologia")
 pred = modelo.predecir(Path("panoramica.png"))
 

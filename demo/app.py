@@ -35,7 +35,7 @@ from dentalvision.render import (
 )
 
 AQUI = Path(__file__).resolve().parent
-REPO_PESOS = os.environ.get("DENTALVISION_REPO", "abp002/dental-vision")
+REPO_PESOS = os.environ.get("DENTALVISION_REPO", "abp0040/dental-vision")
 CODIGO = "https://github.com/abp002/dental-vision"
 
 # Las radiografías de las figuras del README, elegidas con reglas fijas y que
