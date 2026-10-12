@@ -44,6 +44,10 @@ class Odontografo:
         self.dev = dev or dispositivo()
         self.modelo, self.config = cargar(carpeta, dev=self.dev)
         self.ajustes = json.loads((carpeta / "postproceso.json").read_text())["orden"]
+        # Umbral de duda (scripts/ajustar_duda.py). Sin él, ninguna pieza sale dudosa:
+        # así siguen valiendo los pesos publicados antes de medirla.
+        duda = carpeta / "duda.json"
+        self.umbral_duda = json.loads(duda.read_text())["umbral_perdida"] if duda.exists() else None
         self.patologia = None
         if patologia is not None:
             self.patologia, _ = cargar(patologia, dev=self.dev)
@@ -57,13 +61,18 @@ class Odontografo:
         img, escala = cargar_imagen(imagen, self.config["ancho"])
         salida = {k: v.cpu() for k, v in self.modelo([a_tensor(img).to(self.dev)])[0].items()}
         final = postprocesar(
-            salida, "orden", umbral=self.ajustes["umbral"], kappa=self.ajustes["kappa"]
+            salida, "orden", umbral=self.ajustes["umbral"], kappa=self.ajustes["kappa"],
+            dudas=self.umbral_duda is not None,
         )
         mascaras = salida["masks"][final["indices"], 0] > 0.5
         piezas = [
             Pieza(fdi=CLASE_A_FDI[int(c)], caja=tuple(b.tolist()), mascara=m.numpy())
             for c, b, m in zip(final["labels"], final["boxes"], mascaras)
         ]
+        if self.umbral_duda is not None:
+            for pz, perdida, alt in zip(piezas, final["perdidas"], final["alternativas"]):
+                if perdida < self.umbral_duda and int(alt) > 0:
+                    pz.alternativa = int(alt)
         hallazgos = []
         if self.patologia is not None:
             umbral = self.umbral_patologia if umbral_hallazgos is None else umbral_hallazgos

@@ -28,7 +28,7 @@ REPO = "dental-vision"
 
 # Carpeta publicada -> (ejecución en modelos/, ajustes elegidos en validación)
 MODELOS = {
-    "numeracion": ("base", ["postproceso.json"]),
+    "numeracion": ("base", ["postproceso.json", "duda.json"]),
     "patologia": ("patologia", ["umbral.json"]),
 }
 

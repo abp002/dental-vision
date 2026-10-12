@@ -62,6 +62,32 @@ Con unas 29 piezas por radiografía, el borrador sale perfecto en 49 de las 91 y
 
 *Un caso difícil, elegido con regla fija (la primera radiografía en el percentil 90 de fallos: cinco). El fallo típico: el modelo corre un puesto la numeración del cuadrante inferior izquierdo, del incisivo central al segundo premolar. Cada pieza es plausible por sí sola y el orden se respeta, por eso el post-procesado no lo detecta. En rojo, los fallos: «31>41» es una pieza que el modelo numeró 31 y es la 41.*
 
+### Dónde duda
+
+Un borrador sirve si dice dónde mirar. Para cada pieza se repite el alineamiento
+de su arcada prohibiéndole su número: si la arcada apenas pierde puntuación, el
+número no es firme, y la pieza sale marcada con el otro número posible
+(«36?, ¿o 37?»). Mirar la arcada entera y no solo la pieza importa: en un
+análisis exploratorio en validación, la pérdida de la arcada separó las piezas
+mal numeradas mejor que la duda local del detector entre dos números (AUROC
+0,81 frente a 0,69).
+
+El umbral se fijó en validación con una regla decidida antes de mirar la prueba:
+el mayor que marque como mucho dos piezas por radiografía de media. Más de dos
+por boca ya no es «revisa estas», es «revísalo todo» (`scripts/ajustar_duda.py`).
+En prueba:
+
+| Marcadas por radiografía | Fallos que avisa | De las marcadas, mal numeradas | Tasa de fallo de todas las piezas |
+|---|---|---|---|
+| 1,4 (1,1–1,8) | 32% (21%–49%) | 21% (14%–28%) | 3,3% |
+
+Una pieza marcada tiene seis veces más probabilidad de estar mal que una
+cualquiera y, cuando lo está, el otro número que propone es el bueno en el 85%
+de los casos. **El límite**: solo avisa de un tercio de los fallos. Los otros
+dos tercios son corrimientos como el de la figura de arriba, en los que el
+modelo está seguro pieza a pieza y también lo estaría con la fila corrida. Que
+una pieza no salga marcada no garantiza su número.
+
 ## Resultados: hallazgos
 
 Evaluado en los dos conjuntos oficiales del concurso DENTEX, que el modelo no vio
@@ -228,7 +254,7 @@ src/dentalvision/
   particiones.py  separación reproducible entrenamiento/validación/prueba
   datos.py        Dataset de torchvision, máscaras y aumentación
   modelo.py       Mask R-CNN con transfer learning
-  postproceso.py  restricciones anatómicas: unicidad y orden de las piezas
+  postproceso.py  restricciones anatómicas: unicidad y orden de las piezas, y dónde duda
   evaluacion.py   métricas de dominio, AP al estilo COCO e intervalos de confianza
   inferencia.py   de una radiografía a sus piezas y hallazgos (lo usan scripts y demo)
 scripts/
@@ -236,6 +262,7 @@ scripts/
   entrenar.py     entrenamiento; guarda cada ejecución en modelos/<nombre>/
   evaluar.py      ajuste en validación y evaluación final en prueba
   comparar.py     comparación de ejecuciones con bootstrap emparejado
+  ajustar_duda.py umbral de las piezas dudosas (validación) y su medida en prueba
   evaluar_patologia.py  hallazgos en los conjuntos oficiales del concurso
   odontograma.py  figura de una radiografía con su odontograma
   animacion.py    GIF o vídeo del proceso
@@ -352,6 +379,8 @@ correcciones tiene que hacer: los errores por radiografía.
 - [x] Evaluación
 - [x] Detección de hallazgos y su unión con el odontograma
 - [x] Evaluación en los conjuntos oficiales del concurso
+- [x] Piezas con numeración dudosa, marcadas con su alternativa
+- [x] Demo web en Hugging Face
 
 Siguientes pasos:
 

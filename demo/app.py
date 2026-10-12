@@ -180,7 +180,10 @@ def resumen(pred: Prediccion, segundos: float) -> str:
         f"**{contar(len(pred.hallazgos), 'hallazgo', 'hallazgos')}**" + (f" ({detalle})" if detalle else ""),
         f"{coma(segundos)} s en {'GPU' if ODONTOGRAFO.dev.type == 'cuda' else 'CPU'}",
     ]
-    return " · ".join(partes)
+    dudosas = sorted((p for p in pred.piezas if p.dudosa), key=lambda p: p.fdi)
+    revisar = ("\n\n**Revisa la numeración de " + ", ".join(f"{p.fdi} (¿o {p.alternativa}?)" for p in dudosas)
+               + "**: el modelo no está seguro de su número." if dudosas else "")
+    return " · ".join(partes) + revisar
 
 
 def tabla(hallazgos: list[Hallazgo]) -> dict:
@@ -205,7 +208,8 @@ def exportar(pred: Prediccion, umbral: float) -> dict:
     presentes = {p.fdi for p in pred.piezas}
     return {
         "notacion": "FDI",
-        "piezas": [{"fdi": p.fdi, "caja": caja(p.caja)} for p in sorted(pred.piezas, key=lambda p: p.fdi)],
+        "piezas": [{"fdi": p.fdi, "caja": caja(p.caja)} | ({"dudosa_con": p.alternativa} if p.dudosa else {})
+                   for p in sorted(pred.piezas, key=lambda p: p.fdi)],
         "ausentes": [f for f in FDIS if f not in presentes],
         "hallazgos": [
             {"fdi": h.fdi, "tipo": HALLAZGOS[h.patologia][2], "confianza": round(h.confianza, 3),
@@ -244,6 +248,7 @@ def analizar(ruta: str | None, umbral: float, progress=gr.Progress()):
     figura = apilar(
         dibujar_prediccion(vista.imagen, vista.piezas, hallazgos=vista.hallazgos),
         dibujar_odontograma({p.fdi for p in vista.piezas}, hallazgos=vista.por_diente(),
+                            dudosas={p.fdi for p in vista.piezas if p.dudosa},
                             titulo="Odontograma generado"),
     )
     return resumen(vista, segundos), figura, tabla(vista.hallazgos), json_compacto(exportar(vista, umbral))
@@ -267,7 +272,8 @@ CABECERA = f"""
 
 Odontograma automático a partir de una radiografía panorámica: detecta cada
 pieza, la numera en notación FDI y marca los hallazgos (caries, caries
-profunda, lesión periapical y diente impactado).
+profunda, lesión periapical y diente impactado). Es un borrador para revisar,
+y dice dónde mirar: las piezas cuyo número no tiene claro salen en violeta.
 
 [Código y evaluación]({CODIGO}) · [Modelo](https://huggingface.co/{REPO_PESOS})
 """
@@ -286,6 +292,9 @@ DENTEX:
    Después, un post-procesado impone dos reglas anatómicas: cada número una sola
    vez (algoritmo húngaro) y el orden de la arcada (alineamiento por
    programación dinámica).
+3. **Dudas.** Para cada pieza se repite el alineamiento prohibiéndole su
+   número. Si la arcada apenas pierde puntuación, el número no es firme: la
+   pieza sale en violeta con el otro número posible («36/37?»).
 2. **Hallazgos.** Detecta caries, caries profunda, lesión periapical y diente
    impactado, y asigna cada hallazgo a la pieza con la que más solapa.
 
@@ -294,6 +303,11 @@ DENTEX:
 - Numeración: de media hay que corregir 1,6 piezas por radiografía, y el 54% de
   los odontogramas sale perfecto. Los fallos típicos son premolares y molares
   numerados un puesto corrido.
+- Dudas: marca 1,4 piezas por radiografía. Una de cada cinco marcadas está mal
+  numerada (frente a 1 de cada 30 en general) y, cuando lo está, el otro
+  número que propone es el bueno en el 85% de los casos. Pero solo avisa de un
+  tercio de los fallos: los otros dos tercios son corrimientos en los que el
+  modelo está seguro. Que una pieza no salga en violeta no garantiza su número.
 - Dientes impactados: encuentra el 90%.
 - Caries: encuentra el 47% y marca unas 2 falsas por radiografía. Sirve para
   señalar dónde mirar, no para fiarse de lo que no marca.

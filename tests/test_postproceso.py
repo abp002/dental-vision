@@ -68,3 +68,36 @@ def test_sin_detecciones(pred):
     vacio = pred()
     for modo in ("ninguno", "unicidad", "orden"):
         assert len(postprocesar(vacio, modo)["boxes"]) == 0
+
+
+def dudas(salida) -> dict[int, tuple[float, int]]:
+    """FDI -> (pérdida, alternativa) de cada pieza."""
+    return {
+        CLASE_A_FDI[int(c)]: (float(p), int(a))
+        for c, p, a in zip(salida["labels"], salida["perdidas"], salida["alternativas"])
+    }
+
+
+def test_la_duda_no_cambia_la_numeracion(pred):
+    p = pred((0, 0, 10, 20, 16, 0.9), (20, 0, 30, 20, 16, 0.7), (40, 0, 50, 20, 14, 0.5),
+             (40, 0, 50, 20, 13, 0.45))
+    assert fdis(postprocesar(p, "orden", dudas=True)) == fdis(postprocesar(p, "orden"))
+
+
+def test_una_pieza_entre_dos_numeros_pierde_poco_sin_el_suyo(pred):
+    # Dos piezas en el cuadrante 1: una firme (17) y otra que duda entre 15 y 14.
+    p = pred((0, 0, 10, 20, 17, 0.9), (40, 0, 50, 20, 15, 0.5), (40, 0, 50, 20, 14, 0.45))
+    d = dudas(postprocesar(p, "orden", dudas=True))
+    assert d[15][1] == 14  # la alternativa es el número con el que dudaba
+    assert d[15][0] == pytest.approx(0.05)
+    assert d[17][0] > 10 * d[15][0]
+    assert all(perdida >= 0 for perdida, _ in d.values())
+
+
+def test_la_alternativa_de_una_fila_apretada_es_el_vecino(pred):
+    # Tres piezas contiguas 16, 15, 14, todas seguras: sin el suyo, el 14 solo
+    # puede correrse hacia el 13 (el 15 está ocupado).
+    p = pred((0, 0, 10, 20, 16, 0.9), (20, 0, 30, 20, 15, 0.9), (40, 0, 50, 20, 14, 0.9))
+    d = dudas(postprocesar(p, "orden", kappa=0.7, dudas=True))
+    assert d[14][1] == 13
+    assert d[14][0] == pytest.approx(0.9 * (1 - 0.7))

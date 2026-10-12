@@ -26,6 +26,7 @@ COLOR_CUADRANTE = {
 }
 COLOR_PATOLOGIA = (255, 71, 87)  # rojo, solo para hallazgos
 COLOR_ERROR = (255, 71, 87)  # rojo: fallos del modelo frente a la anotacion
+COLOR_DUDA = (190, 150, 255)  # violeta: numero poco firme, revisar
 COLOR_FONDO = (12, 14, 18)
 
 _FUENTES = [
@@ -138,6 +139,11 @@ class Pieza:
     mascara: np.ndarray | None = None  # bool, del tamano de la imagen
     estado: str | None = None
     real: int | None = None
+    alternativa: int | None = None  # si el numero es dudoso, el otro posible
+
+    @property
+    def dudosa(self) -> bool:
+        return self.alternativa is not None
 
 
 ABREVIATURA = {"Caries": "C", "Deep Caries": "CP", "Periapical Lesion": "LP", "Impacted": "I"}
@@ -172,7 +178,8 @@ def dibujar_prediccion(
     """Radiografia con las piezas predichas: mascara y numero FDI.
 
     Los fallos van en rojo: "14>15" es una pieza que el modelo numero 14 y es
-    la 15; un recuadro rojo sin relleno es una pieza que no encontro.
+    la 15; un recuadro rojo sin relleno es una pieza que no encontro. Una pieza
+    dudosa va en violeta y con interrogacion: "14?".
     """
     base = imagen.convert("RGB")
     capa = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -180,8 +187,13 @@ def dibujar_prediccion(
     grosor = max(2, base.width // 700)
     fuente = _fuente(max(16, base.width // 70))
 
+    def color_de(p: Pieza) -> tuple[int, int, int]:
+        if p.estado in ("mal", "sobra", "falta"):
+            return COLOR_ERROR
+        return COLOR_DUDA if p.dudosa else COLOR_CUADRANTE[p.fdi // 10]
+
     for p in piezas:
-        color = COLOR_ERROR if p.estado in ("mal", "sobra", "falta") else COLOR_CUADRANTE[p.fdi // 10]
+        color = color_de(p)
         if p.estado == "falta":
             dib.rectangle(p.caja, outline=(*COLOR_ERROR, 255), width=grosor * 2)
         elif p.mascara is not None:
@@ -190,8 +202,13 @@ def dibujar_prediccion(
             dib.rectangle(p.caja, outline=(*color, 235), width=grosor)
 
     for p in piezas:
-        color = COLOR_ERROR if p.estado in ("mal", "sobra", "falta") else COLOR_CUADRANTE[p.fdi // 10]
-        texto = f"{p.fdi}>{p.real}" if p.estado == "mal" else str(p.fdi)
+        color = color_de(p)
+        if p.estado == "mal":
+            texto = f"{p.fdi}>{p.real}"
+        elif p.dudosa:
+            texto = f"{p.fdi}?"  # la alternativa va en el odontograma y en el texto
+        else:
+            texto = str(p.fdi)
         x1, y1, x2, y2 = p.caja
         _etiqueta(dib, ((x1 + x2) / 2, (y1 + y2) / 2), texto, color, fuente)
 
@@ -213,6 +230,7 @@ def dibujar_odontograma(
     presentes: set[int],
     *,
     errores: set[int] = frozenset(),
+    dudosas: set[int] = frozenset(),
     ocultas: set[int] = frozenset(),
     hallazgos: dict[int, list[str]] | None = None,
     ancho: int = 1600,
@@ -222,6 +240,7 @@ def dibujar_odontograma(
 
     Casilla de color: pieza presente. Gris tachada: ausente. Borde rojo: la
     casilla no coincide con la anotacion (sobra, falta o esta mal numerada).
+    Borde violeta: numero dudoso, a revisar.
     """
     margen = round(ancho * 0.03)
     hueco = max(4, ancho // 250)
@@ -231,27 +250,39 @@ def dibujar_odontograma(
     fuente = _fuente(round(celda * 0.34))
     fuente_titulo = _fuente(round(celda * 0.3))
     cabecera = round(celda * 0.7)
-    alto = cabecera + 2 * alto_celda + hueco * 3 + margen
-
-    img = Image.new("RGB", (ancho, alto), COLOR_FONDO)
-    dib = ImageDraw.Draw(img)
-    dib.text((margen, cabecera * 0.3), titulo, font=fuente_titulo, fill=(235, 237, 240))
 
     leyenda = [("presente", COLOR_CUADRANTE[1], None), ("ausente", (44, 48, 56), None)]
     if hallazgos:
         leyenda.append(("hallazgo (C caries, CP profunda, LP lesión, I impactado)", COLOR_HALLAZGO, None))
+    if dudosas:
+        leyenda.append(("número dudoso: revisar", (44, 48, 56), COLOR_DUDA))
     if errores:
         leyenda.append(("no coincide con la anotación", (44, 48, 56), COLOR_ERROR))
+    lado = round(celda * 0.28)
+    separacion = lado + 8 + 2 * margen // 3
+    medir = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    ancho_leyenda = sum(medir.textlength(t, font=fuente_titulo) for t, _, _ in leyenda) \
+        + separacion * len(leyenda) - 2 * margen // 3
+    # Si no cabe junto al título, la leyenda baja a una segunda línea.
+    y_titulo = y_leyenda = cabecera * 0.3
+    if medir.textlength(titulo, font=fuente_titulo) + margen + ancho_leyenda > ancho - 2 * margen:
+        y_leyenda += fuente_titulo.size * 1.6
+        cabecera += round(fuente_titulo.size * 1.6)
+    alto = cabecera + 2 * alto_celda + hueco * 3 + margen
+
+    img = Image.new("RGB", (ancho, alto), COLOR_FONDO)
+    dib = ImageDraw.Draw(img)
+    dib.text((margen, y_titulo), titulo, font=fuente_titulo, fill=(235, 237, 240))
+
     x = ancho - margen
     for texto, relleno, borde in reversed(leyenda):
         w = dib.textlength(texto, font=fuente_titulo)
         x -= w
-        dib.text((x, cabecera * 0.3), texto, font=fuente_titulo, fill=(170, 175, 185))
-        lado = round(celda * 0.28)
-        y = cabecera * 0.3 + (fuente_titulo.size - lado) / 2 + 2
+        dib.text((x, y_leyenda), texto, font=fuente_titulo, fill=(170, 175, 185))
+        y = y_leyenda + (fuente_titulo.size - lado) / 2 + 2
         dib.rounded_rectangle((x - lado - 8, y, x - 8, y + lado), radius=3, fill=relleno,
                               outline=borde, width=3 if borde else 0)
-        x -= lado + 8 + 2 * margen // 3
+        x -= separacion
 
     for fila, arcada in enumerate(("superior", "inferior")):
         y = cabecera + fila * (alto_celda + hueco * 2)
@@ -270,6 +301,9 @@ def dibujar_odontograma(
                          fill=(80, 86, 96), width=max(2, hueco // 2))
             if fdi in errores:
                 dib.rounded_rectangle(caja, radius=round(celda * 0.12), outline=COLOR_ERROR,
+                                      width=max(3, hueco))
+            elif fdi in dudosas:
+                dib.rounded_rectangle(caja, radius=round(celda * 0.12), outline=COLOR_DUDA,
                                       width=max(3, hueco))
             texto = str(fdi)
             izq, arr, der, aba = dib.textbbox((0, 0), texto, font=fuente)

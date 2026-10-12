@@ -21,6 +21,12 @@ aporta cada regla:
     unicidad   asignación óptima (algoritmo húngaro): cada FDI una sola vez
     orden      alineamiento por programación dinámica en cada arcada: unicidad
                y orden a la vez
+
+En el modo orden se puede medir además cuánto de firme es cada número (DUDA):
+cuánta puntuación pierde la arcada entera si a esa pieza se le prohíbe el suyo,
+y qué número tomaría entonces. Mirar la arcada y no solo la pieza importa: los
+fallos típicos son corrimientos de la fila en los que el detector estaba seguro
+pieza a pieza.
 """
 
 from __future__ import annotations
@@ -107,35 +113,63 @@ def _afinidad(c: Candidato, secuencia: list[int], kappa: float) -> list[float]:
     ]
 
 
+def _dp(a: np.ndarray) -> tuple[float, list[tuple[int, int]]]:
+    """Alineamiento de máxima afinidad total: (afinidad, pares (candidato, posición))."""
+    n, m = a.shape
+    dp = np.zeros((n + 1, m + 1))
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            dp[i, j] = max(dp[i - 1, j], dp[i, j - 1], dp[i - 1, j - 1] + a[i - 1, j - 1])
+
+    pares = []
+    i, j = n, m
+    while i > 0 and j > 0:
+        if a[i - 1, j - 1] > 0 and dp[i, j] == dp[i - 1, j - 1] + a[i - 1, j - 1]:
+            pares.append((i - 1, j - 1))
+            i, j = i - 1, j - 1
+        elif dp[i, j] == dp[i - 1, j]:
+            i -= 1
+        else:
+            j -= 1
+    return float(dp[n, m]), pares[::-1]
+
+
+@dataclass
+class Asignacion:
+    candidato: Candidato
+    fdi: int
+    perdida: float = float("inf")  # lo que pierde la arcada sin este número
+    alternativa: int | None = None  # el número que tomaría sin él
+
+
 def _alinear(
-    candidatos: list[Candidato], secuencia: list[int], kappa: float
-) -> list[tuple[Candidato, int]]:
+    candidatos: list[Candidato], secuencia: list[int], kappa: float, *, dudas: bool = False
+) -> list[Asignacion]:
     """Asigna posiciones de la arcada a los candidatos sin repetir ninguna y
     respetando el orden izquierda-derecha. Maximiza la afinidad total.
 
     Es un alineamiento de dos secuencias, como en bioinformática: candidatos
     ordenados por x contra posiciones de la arcada. Se puede saltar un
     candidato (se descarta) o una posición (pieza ausente).
+
+    Con `dudas`, repite el alineamiento una vez por pieza prohibiéndole su
+    número: la diferencia de afinidad total es su pérdida. Es una DP pequeña
+    (16 posiciones) por pieza, pero se deja fuera del ajuste de umbrales.
     """
     cs = sorted(candidatos, key=lambda c: c.x)
-    n, m = len(cs), len(secuencia)
-    a = [_afinidad(c, secuencia, kappa) for c in cs]
-    dp = np.zeros((n + 1, m + 1))
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            dp[i, j] = max(dp[i - 1, j], dp[i, j - 1], dp[i - 1, j - 1] + a[i - 1][j - 1])
-
-    pares = []
-    i, j = n, m
-    while i > 0 and j > 0:
-        if a[i - 1][j - 1] > 0 and dp[i, j] == dp[i - 1, j - 1] + a[i - 1][j - 1]:
-            pares.append((cs[i - 1], secuencia[j - 1]))
-            i, j = i - 1, j - 1
-        elif dp[i, j] == dp[i - 1, j]:
-            i -= 1
-        else:
-            j -= 1
-    return pares[::-1]
+    if not cs:
+        return []
+    a = np.array([_afinidad(c, secuencia, kappa) for c in cs])
+    total, pares = _dp(a)
+    salida = [Asignacion(cs[i], secuencia[j]) for i, j in pares]
+    if dudas:
+        for s, (i, j) in zip(salida, pares):
+            b = a.copy()
+            b[i, j] = 0.0
+            sin, otros = _dp(b)
+            s.perdida = total - sin
+            s.alternativa = next((secuencia[k] for c, k in otros if c == i), None)
+    return salida
 
 
 def _unicos(candidatos: list[Candidato]) -> list[tuple[Candidato, int]]:
@@ -167,6 +201,15 @@ def _a_prediccion(pares: list[tuple[Candidato, int]]) -> dict:
     }
 
 
+def _con_dudas(salida: dict, asignaciones: list[Asignacion]) -> dict:
+    """Añade `perdidas` y `alternativas` (FDI, 0 si no hay) en el orden de las piezas."""
+    salida["perdidas"] = torch.tensor([s.perdida for s in asignaciones], dtype=torch.float32)
+    salida["alternativas"] = torch.tensor(
+        [s.alternativa or 0 for s in asignaciones], dtype=torch.int64
+    )
+    return salida
+
+
 def postprocesar(
     pred: dict,
     modo: str = "orden",
@@ -174,14 +217,18 @@ def postprocesar(
     umbral: float = 0.5,
     kappa: float = 0.2,
     umbral_iou: float = 0.5,
+    dudas: bool = False,
 ) -> dict:
     """Aplica las restricciones a la salida del detector de una radiografía.
 
     Devuelve un dict como el del detector (boxes, labels, scores) más
     `indices`: la detección original de cada pieza, para recuperar su máscara.
+    Con `dudas` (solo en el modo orden), también `perdidas` y `alternativas`.
     """
     if modo not in MODOS:
         raise ValueError(f"Modo desconocido: {modo}. Opciones: {MODOS}")
+    if dudas and modo != "orden":
+        raise ValueError("La duda se mide sobre el alineamiento: solo en el modo orden")
 
     if modo == "ninguno":
         scores = pred["scores"].cpu()
@@ -199,8 +246,9 @@ def postprocesar(
     if modo == "unicidad":
         return _a_prediccion(_unicos(candidatos))
 
-    pares = []
+    asignaciones = []
     for nombre, secuencia in ARCADAS.items():
         propios = [c for c in candidatos if arcada(c.fdi) == nombre]
-        pares += _alinear(propios, secuencia, kappa)
-    return _a_prediccion(pares)
+        asignaciones += _alinear(propios, secuencia, kappa, dudas=dudas)
+    salida = _a_prediccion([(s.candidato, s.fdi) for s in asignaciones])
+    return _con_dudas(salida, asignaciones) if dudas else salida
