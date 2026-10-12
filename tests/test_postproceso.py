@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from dentalvision.datos import CLASE_A_FDI
 from dentalvision.postproceso import agrupar, postprocesar
@@ -101,3 +102,56 @@ def test_la_alternativa_de_una_fila_apretada_es_el_vecino(pred):
     d = dudas(postprocesar(p, "orden", kappa=0.7, dudas=True))
     assert d[14][1] == 13
     assert d[14][0] == pytest.approx(0.9 * (1 - 0.7))
+
+
+# --- Detector de arcada y posición (sin el lado) --------------------------------
+
+
+@pytest.fixture
+def pred_posicion():
+    """Como `pred`, pero con (x1, y1, x2, y2, (arcada, posición), score)."""
+    from dentalvision.datos import POSICION_A_CLASE
+
+    def construir(*detecciones):
+        return {
+            "boxes": torch.tensor([d[:4] for d in detecciones], dtype=torch.float32).reshape(-1, 4),
+            "labels": torch.tensor([POSICION_A_CLASE[d[4]] for d in detecciones], dtype=torch.int64),
+            "scores": torch.tensor([d[5] for d in detecciones], dtype=torch.float32),
+        }
+
+    return construir
+
+
+def test_sin_orden_el_lado_sale_de_la_mitad_de_la_imagen(pred_posicion):
+    # Primer molar superior a cada lado del centro (x = 100).
+    p = pred_posicion((0, 0, 10, 20, ("superior", 6), 0.9), (190, 0, 200, 20, ("superior", 6), 0.9),
+                      (0, 50, 10, 70, ("inferior", 6), 0.9))
+    salida = postprocesar(p, "ninguno", etiquetas="posicion", centro=100)
+    assert sorted(fdis(salida)) == [16, 26, 46]
+    assert len(salida["boxes"]) == 3  # sin el lado contrario como pieza aparte
+
+
+def test_el_orden_de_la_fila_manda_sobre_la_mitad(pred_posicion):
+    # Los dos incisivos centrales caen a la izquierda del centro (paciente algo
+    # desplazado): por la mitad serían los dos 11, pero en fila son 11 y 21.
+    p = pred_posicion((70, 0, 80, 20, ("superior", 1), 0.9), (85, 0, 95, 20, ("superior", 1), 0.9))
+    assert fdis(postprocesar(p, "orden", etiquetas="posicion", centro=100, beta=0.5)) == [11, 21]
+
+
+def test_los_dos_lados_no_suman_presencia(pred_posicion):
+    # 0,4 no pasa un umbral de 0,5 aunque su copia del otro lado añada 0,4·beta.
+    p = pred_posicion((0, 0, 10, 20, ("superior", 6), 0.4))
+    assert len(postprocesar(p, "orden", umbral=0.5, etiquetas="posicion", centro=100, beta=0.9)["boxes"]) == 0
+
+
+def test_los_indices_apuntan_a_la_deteccion_original(pred_posicion):
+    # Los índices sirven para recuperar la máscara de la salida del detector.
+    p = pred_posicion((190, 0, 200, 20, ("superior", 6), 0.6), (0, 0, 10, 20, ("superior", 7), 0.9))
+    salida = postprocesar(p, "orden", etiquetas="posicion", centro=100)
+    por_fdi = dict(zip(fdis(salida), sorted(salida["indices"].tolist(), key=lambda i: p["boxes"][i, 0])))
+    assert por_fdi == {17: 1, 26: 0}
+
+
+def test_posicion_sin_centro_es_un_error(pred_posicion):
+    with pytest.raises(ValueError):
+        postprocesar(pred_posicion(), "orden", etiquetas="posicion")

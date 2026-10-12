@@ -106,7 +106,7 @@ def particion_de(tarea: str) -> tuple[Subconjunto, Particion]:
     son los conjuntos oficiales del concurso; por eso se apartan las copias de
     esos conjuntos que aparecen entre las imágenes de entrenamiento.
     """
-    if tarea == "numeracion":
+    if tarea in ("numeracion", "posicion"):  # las mismas radiografías y particiones
         sub = Subconjunto("enumeracion")
         return sub, particionar(sub)
     if tarea == "patologia":

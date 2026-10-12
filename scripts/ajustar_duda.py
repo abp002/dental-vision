@@ -25,7 +25,7 @@ import torch
 
 from dentalvision.datos import FDI_A_CLASE
 from dentalvision.evaluacion import emparejar
-from dentalvision.postproceso import postprocesar
+from dentalvision.postproceso import opciones, postprocesar
 
 RAIZ = Path(__file__).resolve().parents[1]
 DUDAS = 2.0  # piezas marcadas por radiografía, de media, como mucho
@@ -40,9 +40,10 @@ def piezas(carpeta: Path, particion: str) -> list[list[tuple[float, bool, bool]]
         sys.exit(f"Falta {cache}: pasa antes scripts/evaluar.py --particion {particion}.")
     datos = torch.load(cache, weights_only=True)
     ajustes = json.loads((carpeta / "postproceso.json").read_text())["orden"]
+    config = json.loads((carpeta / "config.json").read_text())
     salida = []
     for p, v in zip(datos["preds"], datos["reales"], strict=True):
-        f = postprocesar(p, "orden", umbral=ajustes["umbral"], kappa=ajustes["kappa"], dudas=True)
+        f = postprocesar(p, "orden", **opciones(config, ajustes), dudas=True)
         orden = torch.argsort(f["scores"], descending=True)
         etiquetas, alternativas = f["labels"][orden], f["alternativas"][orden]
         perdidas = f["perdidas"][orden]

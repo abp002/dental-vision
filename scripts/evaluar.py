@@ -34,11 +34,14 @@ from dentalvision.evaluacion import (
 )
 from dentalvision.modelo import cargar, dispositivo, sin_mascaras
 from dentalvision.particiones import particionar
-from dentalvision.postproceso import MODOS, postprocesar
+from dentalvision.postproceso import MODOS, opciones, postprocesar
 
 RAIZ = Path(__file__).resolve().parents[1]
 UMBRALES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
 KAPPAS = (0.1, 0.2, 0.3, 0.5, 0.7, 0.9)
+# Solo con el detector de arcada y posición: cuánto pesa el lado contrario a la
+# mitad de la imagen en la que cae la pieza (ver postproceso.py).
+BETAS = (0.1, 0.3, 0.5, 0.8, 1.0)
 METRICAS = {
     "cobertura": lambda r: r.cobertura,
     "numeracion": lambda r: r.numeracion,
@@ -81,18 +84,25 @@ def predicciones(carpeta: Path, particion: str, rehacer: bool):
     return preds, reales, ficheros
 
 
-def aplicar(preds, modo, ajustes):
-    return [postprocesar(p, modo, umbral=ajustes["umbral"], kappa=ajustes["kappa"] or 0.2)
-            for p in preds]
+def aplicar(preds, modo, ajustes, config):
+    return [postprocesar(p, modo, **opciones(config, ajustes)) for p in preds]
+
+
+def configuracion(carpeta: Path) -> dict:
+    return json.loads((carpeta / "config.json").read_text())
 
 
 def ajustar(preds, reales, carpeta: Path) -> None:
+    config = configuracion(carpeta)
+    posicion = config.get("tarea") == "posicion"
     mejores = {}
     for modo in MODOS:
-        for umbral, kappa in product(UMBRALES, KAPPAS if modo == "orden" else (None,)):
-            ajustes = {"umbral": umbral, "kappa": kappa}
-            r = evaluar(aplicar(preds, modo, ajustes), reales, umbral_score=0.0)
-            print(f"{modo:9} umbral {umbral:.1f}  kappa {kappa or '-':>4}   {r}")
+        kappas = KAPPAS if modo == "orden" else (None,)
+        betas = BETAS if posicion and modo != "ninguno" else (None,)
+        for umbral, kappa, beta in product(UMBRALES, kappas, betas):
+            ajustes = {"umbral": umbral, "kappa": kappa} | ({"beta": beta} if beta else {})
+            r = evaluar(aplicar(preds, modo, ajustes, config), reales, umbral_score=0.0)
+            print(f"{modo:9} umbral {umbral:.1f}  kappa {kappa or '-':>4}  beta {beta or '-':>4}   {r}")
             clave = (r.errores_por_radiografia, -r.exactitud)
             if modo not in mejores or clave < mejores[modo][0]:
                 mejores[modo] = (clave, ajustes, r)
@@ -140,12 +150,14 @@ def probar(preds, reales, ficheros, carpeta: Path) -> None:
         sys.exit("Falta postproceso.json: ajusta antes en validación "
                  f"(uv run python scripts/evaluar.py --ejecucion {carpeta.name}).")
     ajustes = json.loads(ruta.read_text())
+    config = configuracion(carpeta)
 
     resultados = {}
     print("| Post-procesado | Cobertura | Numeración | Exactitud | Errores por radiografía | Odontogramas perfectos |")
     print("|---|---|---|---|---|---|")
     for modo in MODOS:
-        por_rx = evaluar_por_radiografia(aplicar(preds, modo, ajustes[modo]), reales, umbral_score=0.0)
+        por_rx = evaluar_por_radiografia(aplicar(preds, modo, ajustes[modo], config), reales,
+                                         umbral_score=0.0)
         total = sum(por_rx, Resultado())
         fila = {"ajustes": ajustes[modo], "totales": vars(total)}
         celdas = []
@@ -160,7 +172,7 @@ def probar(preds, reales, ficheros, carpeta: Path) -> None:
         resultados[modo] = fila
         print(f"| {modo} | " + " | ".join(celdas) + " |")
 
-    final = aplicar(preds, "orden", ajustes["orden"])
+    final = aplicar(preds, "orden", ajustes["orden"], config)
     errores = Counter(min(3, round(r.errores_por_radiografia))
                       for r in evaluar_por_radiografia(final, reales, umbral_score=0.0))
     print(f"\nRadiografías por número de errores (orden): 0 -> {errores[0]}, 1 -> {errores[1]}, "

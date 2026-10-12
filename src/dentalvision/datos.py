@@ -24,6 +24,22 @@ FDI_A_CLASE = {f: i + 1 for i, f in enumerate(FDIS)}
 CLASE_A_FDI = {i + 1: f for i, f in enumerate(FDIS)}
 N_CLASES = len(FDIS) + 1
 
+# La numeración también se puede aprender sin el lado: 16 clases de arcada y
+# posición ("primer molar superior"). El 16 y el 26 son la misma clase; el lado
+# lo decide después el post-procesado, por el orden de la fila y por en qué mitad
+# de la imagen cae la pieza (ver postproceso.py).
+ARCADA_POSICION = [(a, p) for a in ("superior", "inferior") for p in range(1, 9)]
+POSICION_A_CLASE = {ap: i + 1 for i, ap in enumerate(ARCADA_POSICION)}
+CLASE_A_POSICION = {i + 1: ap for i, ap in enumerate(ARCADA_POSICION)}
+
+
+def lados(clase: int) -> tuple[int, int]:
+    """Los dos FDI de una clase de arcada y posición: (izquierda, derecha) de la
+    imagen. La izquierda de la imagen es la derecha del paciente (cuadrantes 1 y 4)."""
+    arcada, p = CLASE_A_POSICION[clase]
+    return (10 + p, 20 + p) if arcada == "superior" else (40 + p, 30 + p)
+
+
 # Segunda tarea: los 4 hallazgos de DENTEX, sobre la caja del diente afectado.
 PATOLOGIA_A_CLASE = {p: i + 1 for i, p in enumerate(PATOLOGIAS)}
 CLASE_A_PATOLOGIA = {i + 1: p for i, p in enumerate(PATOLOGIAS)}
@@ -44,6 +60,10 @@ def _clase_fdi(d: Diente) -> int:
     return FDI_A_CLASE[d.fdi]
 
 
+def _clase_posicion(d: Diente) -> int:
+    return POSICION_A_CLASE[("superior" if d.cuadrante in (1, 2) else "inferior", d.posicion)]
+
+
 def _clase_patologia(d: Diente) -> int | None:
     return PATOLOGIA_A_CLASE.get(d.patologia)
 
@@ -53,7 +73,8 @@ def _espejo_fdi(clase: int) -> int:
 
 
 def _sin_cambio(clase: int) -> int:
-    # Una caries en el espejo sigue siendo una caries.
+    # Una caries en el espejo sigue siendo una caries, y un primer molar
+    # superior, un primer molar superior.
     return clase
 
 
@@ -188,5 +209,6 @@ def colacion(lote):
 
 TAREAS = {
     "numeracion": Tarea("numeracion", N_CLASES, _clase_fdi, _espejo_fdi),
+    "posicion": Tarea("posicion", len(ARCADA_POSICION) + 1, _clase_posicion, _sin_cambio),
     "patologia": Tarea("patologia", len(PATOLOGIAS) + 1, _clase_patologia, _sin_cambio),
 }

@@ -335,6 +335,8 @@ se prefiere el vecino más cercano a lo que vio el detector. Medido en prueba, a
 
 **BatchNorm del backbone.** La v2 usa BatchNorm normal, y con lotes de 2 imágenes sus estadísticas se recalculan con muy poca muestra. Congelarla (`FrozenBatchNorm2d`), lo habitual al ajustar con lotes pequeños, no mejora nada medible: 1,67 errores por radiografía en validación frente a 1,60, diferencia +0,06 con intervalo de −0,18 a +0,34. Se queda como viene.
 
+**Etiquetas sin el lado (resultado negativo).** DENTEX anota cuadrante y posición por separado, y la idea parecía buena: el cuadrante se ve por dónde está la pieza y la posición, por su forma. Se probó un detector de 16 clases, arcada y posición («primer molar superior»), en el que el 16 y el 26 son la misma clase: el doble de ejemplos por clase, y el volteo horizontal ya no tiene que remapear etiquetas. El lado lo decide el alineamiento por el orden de la fila, con la mitad de la imagen como desempate (`--tarea posicion`; ver `postproceso.py`). Sale peor: 2,44 errores por radiografía en validación frente a 2,08, diferencia +0,36 con intervalo de +0,10 a +0,64, y 46% de odontogramas perfectos frente a 55%. Ya en crudo, sin poder equivocarse de lado, comete más errores (2,95 frente a 2,62). Y en validación el desempate por la mitad de la imagen no ayuda nada (gana β = 1, los dos lados por igual). La lectura más probable es que el modelo de 32 clases ya aprovechaba lo que esta idea quería darle: el volteo con remapeo le enseña la simetría, y saber el número entero le da contexto de la fila que se pierde al juntar los lados. No se evaluó en prueba: no ganó en validación. Es una sola semilla por modelo; la diferencia es clara frente al ruido entre radiografías, no necesariamente frente al de entrenar otra vez.
+
 **Los hallazgos, un segundo modelo aparte.** El mismo Mask R-CNN con 4 clases,
 entrenado sobre las 705 radiografías de patología, cuyas cajas son los dientes
 afectados. Aquí el volteo no remapea nada: una caries en el espejo sigue siendo
@@ -384,11 +386,11 @@ correcciones tiene que hacer: los errores por radiografía.
 
 Siguientes pasos:
 
-- **Etiquetas jerárquicas.** DENTEX anota cuadrante y posición por separado, y son
-  señales visuales distintas: el cuadrante se deduce de dónde está la pieza y la
-  posición, de su forma. Entrenar solo la posición (8 clases, unas cuatro veces
-  más ejemplos por clase que las 32 actuales) y sacar el cuadrante por geometría
-  ataca directamente el error dominante.
+- **El error dominante sigue abierto.** Dos de cada tres fallos son corrimientos
+  de la fila en los que el modelo está seguro, y juntar los dos lados en una
+  clase no los arregla (ver «Etiquetas sin el lado»). Lo siguiente sería darle al
+  modelo la fila entera en lugar de pieza a pieza, por ejemplo un modelo de
+  secuencia sobre las detecciones de cada arcada.
 - **Caries**: es lo más útil clínicamente y lo más flojo. Más resolución (las
   caries pequeñas ocupan pocos píxeles a 1.333 px) y recortes por diente son lo
   primero a probar.

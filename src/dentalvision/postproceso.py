@@ -22,6 +22,12 @@ aporta cada regla:
     orden      alineamiento por programación dinámica en cada arcada: unicidad
                y orden a la vez
 
+Si el detector aprendió arcada y posición sin el lado (tarea "posicion", ver
+datos.py), cada detección propone primero sus dos números posibles: el de la
+mitad de la imagen en la que cae, con su puntuación, y el del otro lado, con
+`beta` veces esa puntuación. El orden de la fila decide entre ellos; la mitad de
+la imagen solo desempata (el paciente se coloca centrado con el mordedor).
+
 En el modo orden se puede medir además cuánto de firme es cada número (DUDA):
 cuánta puntuación pierde la arcada entera si a esa pieza se le prohíbe el suyo,
 y qué número tomaría entonces. Mirar la arcada y no solo la pieza importa: los
@@ -37,7 +43,7 @@ import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 
-from .datos import CLASE_A_FDI, FDI_A_CLASE, FDIS
+from .datos import CLASE_A_FDI, FDI_A_CLASE, FDIS, lados
 from .dentex import ARCADAS
 from .evaluacion import iou
 
@@ -55,6 +61,9 @@ class Candidato:
     indice: int  # detección más segura del grupo: de ella salen caja y máscara
     caja: torch.Tensor  # xyxy
     fdis: dict[int, float] = field(default_factory=dict)  # mejor puntuación por FDI
+    # Mejor puntuación por clase del detector, si no son FDI (tarea "posicion"):
+    # los dos lados de una misma detección no suman presencia.
+    crudas: dict[int, float] = field(default_factory=dict)
 
     @property
     def fdi(self) -> int:
@@ -67,7 +76,7 @@ class Candidato:
         Si el detector duda entre 16 (0,45) y 17 (0,40), ninguna hipótesis pasa
         un umbral de 0,5, pero está claro que hay un diente.
         """
-        return min(1.0, sum(self.fdis.values()))
+        return min(1.0, sum((self.crudas or self.fdis).values()))
 
     @property
     def x(self) -> float:
@@ -80,6 +89,7 @@ def agrupar(pred: dict, *, umbral_iou: float = 0.5) -> list[Candidato]:
     scores = pred["scores"].cpu()
     cajas = pred["boxes"].cpu()
     etiquetas = pred["labels"].cpu()
+    crudas, brutos = pred.get("crudas"), pred.get("scores_crudos")
     orden = torch.argsort(scores, descending=True).tolist()
     solape = iou(cajas, cajas)
     usada = [False] * len(orden)
@@ -93,6 +103,9 @@ def agrupar(pred: dict, *, umbral_iou: float = 0.5) -> list[Candidato]:
                 usada[j] = True
                 f = CLASE_A_FDI[int(etiquetas[j])]
                 c.fdis[f] = max(c.fdis.get(f, 0.0), float(scores[j]))
+                if crudas is not None:
+                    k = int(crudas[j])
+                    c.crudas[k] = max(c.crudas.get(k, 0.0), float(brutos[j]))
         grupos.append(c)
     return grupos
 
@@ -210,6 +223,40 @@ def _con_dudas(salida: dict, asignaciones: list[Asignacion]) -> dict:
     return salida
 
 
+def expandir(pred: dict, centro: float, beta: float) -> dict:
+    """De clases de arcada y posición a números FDI: cada detección se desdobla en
+    sus dos lados. `origen` es la detección de la que sale cada fila."""
+    cajas, etiquetas, scores = pred["boxes"].cpu(), pred["labels"].cpu(), pred["scores"].cpu()
+    filas = []
+    for k in range(len(scores)):
+        izquierda, derecha = lados(int(etiquetas[k]))
+        x = float(cajas[k, 0] + cajas[k, 2]) / 2
+        propio, otro = (izquierda, derecha) if x < centro else (derecha, izquierda)
+        s = float(scores[k])
+        filas.append((k, propio, s))
+        if beta > 0:
+            filas.append((k, otro, s * beta))
+    origen = torch.tensor([k for k, _, _ in filas], dtype=torch.int64)
+    return {
+        "boxes": cajas[origen].reshape(-1, 4),
+        "labels": torch.tensor([FDI_A_CLASE[f] for _, f, _ in filas], dtype=torch.int64),
+        "scores": torch.tensor([s for _, _, s in filas], dtype=torch.float32),
+        "crudas": etiquetas[origen],
+        "scores_crudos": scores[origen],
+        "origen": origen,
+    }
+
+
+def opciones(config: dict, ajustes: dict) -> dict:
+    """Argumentos de `postprocesar` para un modelo (su config.json) con los
+    ajustes elegidos en validación (postproceso.json)."""
+    salida = {"umbral": ajustes["umbral"], "kappa": ajustes.get("kappa") or 0.2}
+    if config.get("tarea") == "posicion":
+        salida |= {"etiquetas": "posicion", "centro": config["ancho"] / 2,
+                   "beta": ajustes.get("beta") or 0.5}
+    return salida
+
+
 def postprocesar(
     pred: dict,
     modo: str = "orden",
@@ -218,17 +265,33 @@ def postprocesar(
     kappa: float = 0.2,
     umbral_iou: float = 0.5,
     dudas: bool = False,
+    etiquetas: str = "fdi",
+    centro: float | None = None,
+    beta: float = 0.5,
 ) -> dict:
     """Aplica las restricciones a la salida del detector de una radiografía.
 
     Devuelve un dict como el del detector (boxes, labels, scores) más
     `indices`: la detección original de cada pieza, para recuperar su máscara.
     Con `dudas` (solo en el modo orden), también `perdidas` y `alternativas`.
+    Con `etiquetas="posicion"`, el detector dio arcada y posición: hace falta
+    `centro`, la x de la mitad de la imagen.
     """
     if modo not in MODOS:
         raise ValueError(f"Modo desconocido: {modo}. Opciones: {MODOS}")
     if dudas and modo != "orden":
         raise ValueError("La duda se mide sobre el alineamiento: solo en el modo orden")
+    if etiquetas == "posicion":
+        if centro is None:
+            raise ValueError("Con etiquetas de posición hace falta el centro de la imagen")
+        # Sin alineamiento, nada puede corregir el lado: solo el de su mitad.
+        pred = expandir(pred, centro, beta if modo != "ninguno" else 0.0)
+        salida = postprocesar(pred, modo, umbral=umbral, kappa=kappa,
+                              umbral_iou=umbral_iou, dudas=dudas)
+        salida["indices"] = pred["origen"][salida["indices"]]
+        return salida
+    if etiquetas != "fdi":
+        raise ValueError(f"Etiquetas desconocidas: {etiquetas}")
 
     if modo == "ninguno":
         scores = pred["scores"].cpu()

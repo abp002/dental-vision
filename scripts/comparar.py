@@ -25,7 +25,7 @@ from dentalvision.evaluacion import (
     evaluar_por_radiografia,
     intervalo_diferencia,
 )
-from dentalvision.postproceso import postprocesar
+from dentalvision.postproceso import opciones, postprocesar
 
 RAIZ = Path(__file__).resolve().parents[1]
 
@@ -34,8 +34,8 @@ def cargar_ejecucion(nombre: str):
     carpeta = RAIZ / "modelos" / nombre
     cache = torch.load(carpeta / "predicciones_validacion.pt", weights_only=True)
     ajustes = json.loads((carpeta / "postproceso.json").read_text())["orden"]
-    salida = [postprocesar(p, "orden", umbral=ajustes["umbral"], kappa=ajustes["kappa"])
-              for p in cache["preds"]]
+    config = json.loads((carpeta / "config.json").read_text())
+    salida = [postprocesar(p, "orden", **opciones(config, ajustes)) for p in cache["preds"]]
     por_rx = evaluar_por_radiografia(salida, cache["reales"], umbral_score=0.0)
     historial = [json.loads(linea) for linea in (carpeta / "historial.jsonl").read_text().splitlines()]
     return {

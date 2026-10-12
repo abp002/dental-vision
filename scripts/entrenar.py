@@ -76,7 +76,9 @@ def validar(modelo, cargador, dev, tarea: str) -> tuple[dict, float, str]:
             # A CPU en cuanto salen: acumularlas en la GPU la llena sin necesidad.
             preds.extend({k: v.cpu() for k, v in s.items()} for s in salida)
             reales.extend(tgts)
-    if tarea == "numeracion":
+    if tarea in ("numeracion", "posicion"):
+        # En posición, la etiqueta no lleva el lado: elige la época sin post-procesado,
+        # como en numeración, y el lado se mide después con scripts/evaluar.py.
         res = evaluar(preds, reales)
         return res.metricas(), -res.errores_por_radiografia, str(res)
     m = ap_coco(preds, reales, CLASE_A_PATOLOGIA)

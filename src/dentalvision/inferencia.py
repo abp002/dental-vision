@@ -16,7 +16,7 @@ from PIL import Image
 from .datos import CLASE_A_FDI, CLASE_A_PATOLOGIA, a_tensor, cargar_imagen
 from .evaluacion import iou
 from .modelo import cargar, dispositivo, sin_mascaras
-from .postproceso import postprocesar
+from .postproceso import opciones, postprocesar
 from .render import Hallazgo, Pieza
 
 
@@ -61,8 +61,7 @@ class Odontografo:
         img, escala = cargar_imagen(imagen, self.config["ancho"])
         salida = {k: v.cpu() for k, v in self.modelo([a_tensor(img).to(self.dev)])[0].items()}
         final = postprocesar(
-            salida, "orden", umbral=self.ajustes["umbral"], kappa=self.ajustes["kappa"],
-            dudas=self.umbral_duda is not None,
+            salida, "orden", **opciones(self.config, self.ajustes), dudas=self.umbral_duda is not None,
         )
         mascaras = salida["masks"][final["indices"], 0] > 0.5
         piezas = [
