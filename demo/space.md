@@ -25,7 +25,8 @@ tags:
 Demo del proyecto [dental-vision](https://github.com/abp002/dental-vision): a
 partir de una radiografía panorámica, detecta cada pieza dental, la numera en
 notación FDI y marca los hallazgos (caries, caries profunda, lesión periapical y
-diente impactado). Devuelve la radiografía anotada, el odontograma y el
+diente impactado). Marca en violeta las piezas cuyo número no tiene claro, con
+el otro número posible. Devuelve la radiografía anotada, el odontograma y el
 resultado en JSON.
 
 **Proyecto de investigación, no apto para uso clínico.**

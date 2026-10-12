@@ -33,8 +33,8 @@ Los dos son Mask R-CNN v2 de torchvision (ResNet-50 FPN, preentrenado en COCO)
 y trabajan a 1.333 px de ancho. Cada carpeta trae los pesos
 (`mejor.safetensors`, la mejor época en validación), la configuración de
 entrenamiento y lo que se ajustó en validación: el post-procesado anatómico de la
-numeración (`postproceso.json`) y el umbral de confianza de los hallazgos
-(`umbral.json`).
+numeración (`postproceso.json`), el umbral de las piezas de número dudoso
+(`duda.json`) y el umbral de confianza de los hallazgos (`umbral.json`).
 
 ## Uso
 
@@ -49,12 +49,16 @@ modelo = Odontografo(pesos / "numeracion", patologia=pesos / "patologia")
 pred = modelo.predecir(Path("panoramica.png"))
 
 print(sorted(p.fdi for p in pred.piezas))
+print([(p.fdi, p.alternativa) for p in pred.piezas if p.dudosa])  # revisar: ¿36 o 37?
 print([(h.fdi, h.patologia, round(h.confianza, 2)) for h in pred.hallazgos])
 ```
 
 Las cajas salen a la resolución de trabajo; divididas por `pred.escala`, en
 píxeles de la imagen original. `Odontografo` aplica el post-procesado anatómico:
-cada número una sola vez y en el orden de la arcada.
+cada número una sola vez y en el orden de la arcada. Las piezas cuyo número
+no es firme llevan `alternativa`: en prueba, una de cada cinco marcadas está mal
+numerada (frente a 1 de cada 30 en general), pero solo se marca un tercio de
+los fallos.
 
 ## Resultados
 
