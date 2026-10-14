@@ -344,6 +344,16 @@ una caries. Cada hallazgo se asigna al diente del odontograma que más solapa co
 él. Separar las dos tareas permite entrenar cada una con su subconjunto completo;
 un solo modelo con las tres etiquetas jerárquicas es la alternativa natural.
 
+**Más resolución no mejora las caries (resultado negativo).** Las caries pequeñas
+ocupan pocos píxeles a 1.333 px, así que se entrenó el modelo de hallazgos a 2.000 px.
+En validación no gana: AP 0,340 frente a 0,354, y en caries 0,277 frente a 0,302.
+Una ejecución anterior a 2.000 px, que se cortó en la época 16, ya había llegado a
+0,358, así que entre dos entrenamientos iguales hay unas ±0,02 de ruido y la
+resolución no aporta nada medible. Cuesta el doble: 2 minutos por época y 4,8 GB
+de VRAM frente a 1 minuto y 2,6 GB. No se evaluó en prueba. La inferencia ya carga
+cada modelo a su propio ancho (`config.json`), así que probar otra resolución no
+exige tocar la demo.
+
 **La prueba se mira una vez.** Los umbrales del post-procesado y la elección entre
 configuraciones se hacen en validación, y `scripts/evaluar.py` se niega a evaluar
 la partición de prueba si no están fijados. Los intervalos de confianza se
@@ -382,7 +392,7 @@ correcciones tiene que hacer: los errores por radiografía.
 - [x] Detección de hallazgos y su unión con el odontograma
 - [x] Evaluación en los conjuntos oficiales del concurso
 - [x] Piezas con numeración dudosa, marcadas con su alternativa
-- [x] Demo web en Hugging Face
+- [x] Demo web (Gradio, en local) y pesos publicados en Hugging Face
 
 Siguientes pasos:
 
@@ -391,9 +401,9 @@ Siguientes pasos:
   clase no los arregla (ver «Etiquetas sin el lado»). Lo siguiente sería darle al
   modelo la fila entera en lugar de pieza a pieza, por ejemplo un modelo de
   secuencia sobre las detecciones de cada arcada.
-- **Caries**: es lo más útil clínicamente y lo más flojo. Más resolución (las
-  caries pequeñas ocupan pocos píxeles a 1.333 px) y recortes por diente son lo
-  primero a probar.
+- **Caries**: es lo más útil clínicamente y lo más flojo. Subir la resolución
+  no ayudó (ver «Más resolución no mejora las caries»); lo siguiente serían
+  recortes por diente, un clasificador sobre cada pieza ya localizada.
 - **Estado de cada pieza** (corona, implante, endodoncia): requiere otro conjunto
   de datos.
 - **Validación externa**, con radiografías de otro centro y otro equipo. La

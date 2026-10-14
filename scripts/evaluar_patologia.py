@@ -25,6 +25,7 @@ import argparse
 import json
 import random
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -72,7 +73,11 @@ def predecir(modelo, odontografo, sub, radiografias, dev, ancho):
         img, escala = cargar_imagen(sub.ruta(r), ancho)
         with sin_mascaras(modelo):
             p = {k: v.cpu() for k, v in modelo([a_tensor(img).to(dev)])[0].items()}
-        p["fdi"] = asignar_diente(p, odontografo.predecir(img).piezas)
+        # El odontógrafo trabaja a su ancho: sus piezas, a la escala de los hallazgos.
+        numeracion = odontografo.predecir(img)
+        factor = img.width / numeracion.imagen.width
+        piezas = [replace(pz, caja=tuple(v * factor for v in pz.caja)) for pz in numeracion.piezas]
+        p["fdi"] = asignar_diente(p, piezas)
         preds.append(p)
         dientes = [d for d in r.dientes if d.patologia in PATOLOGIA_A_CLASE]
         reales.append({

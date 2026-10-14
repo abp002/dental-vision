@@ -50,7 +50,9 @@ class Odontografo:
         self.umbral_duda = json.loads(duda.read_text())["umbral_perdida"] if duda.exists() else None
         self.patologia = None
         if patologia is not None:
-            self.patologia, _ = cargar(patologia, dev=self.dev)
+            self.patologia, config_patologia = cargar(patologia, dev=self.dev)
+            # Cada modelo trabaja a su resolución (config.json).
+            self.ancho_patologia = config_patologia["ancho"]
             self.umbral_patologia = json.loads((patologia / "umbral.json").read_text())["umbral"]
 
     @torch.no_grad()
@@ -75,12 +77,19 @@ class Odontografo:
         hallazgos = []
         if self.patologia is not None:
             umbral = self.umbral_patologia if umbral_hallazgos is None else umbral_hallazgos
-            hallazgos = self._hallazgos(img, piezas, umbral)
+            hallazgos = self._hallazgos(imagen, img, piezas, umbral)
         return Prediccion(img, escala, piezas, final, hallazgos)
 
-    def _hallazgos(self, img: Image.Image, piezas: list[Pieza], umbral: float) -> list[Hallazgo]:
+    def _hallazgos(self, original: Path | Image.Image, img: Image.Image, piezas: list[Pieza],
+                   umbral: float) -> list[Hallazgo]:
+        # Desde la original, no ampliando `img`: ampliar no recupera el detalle.
+        entrada = img
+        if self.ancho_patologia != img.width:
+            entrada, _ = cargar_imagen(original, self.ancho_patologia)
+        factor = entrada.width / img.width
         with sin_mascaras(self.patologia):
-            p = {k: v.cpu() for k, v in self.patologia([a_tensor(img).to(self.dev)])[0].items()}
+            p = {k: v.cpu() for k, v in self.patologia([a_tensor(entrada).to(self.dev)])[0].items()}
+        p["boxes"] = p["boxes"] / factor  # a la resolución de trabajo, la de las piezas
         keep = p["scores"] >= umbral
         cajas, clases, scores = p["boxes"][keep], p["labels"][keep], p["scores"][keep]
         salida = []
