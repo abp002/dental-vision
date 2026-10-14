@@ -1,6 +1,6 @@
 """Demo web de dental-vision: de una radiografía panorámica a su odontograma.
 
-Es la aplicación del Space de Hugging Face. En local:
+Se ejecuta en local (Hugging Face ya no aloja Spaces de Gradio gratis):
 
     uv run --group demo python scripts/publicar.py     # exporta los pesos a publicar/modelo
     DENTALVISION_PESOS=publicar/modelo uv run --group demo python demo/app.py
@@ -279,9 +279,8 @@ y dice dónde mirar: las piezas cuyo número no tiene claro salen en violeta.
 """
 
 AVISO = """
-**Proyecto de investigación, no apto para uso clínico.** No subas radiografías
-de pacientes: la demo es pública. No guarda las imágenes; los ficheros
-temporales se borran en menos de una hora.
+**Proyecto de investigación, no apto para uso clínico.** No guarda las
+imágenes: los ficheros temporales se borran en menos de una hora.
 """
 
 COMO_FUNCIONA = f"""
@@ -292,11 +291,11 @@ DENTEX:
    Después, un post-procesado impone dos reglas anatómicas: cada número una sola
    vez (algoritmo húngaro) y el orden de la arcada (alineamiento por
    programación dinámica).
-3. **Dudas.** Para cada pieza se repite el alineamiento prohibiéndole su
-   número. Si la arcada apenas pierde puntuación, el número no es firme: la
-   pieza sale en violeta con el otro número posible («36/37?»).
 2. **Hallazgos.** Detecta caries, caries profunda, lesión periapical y diente
    impactado, y asigna cada hallazgo a la pieza con la que más solapa.
+3. **Dudas.** Para cada pieza se repite el alineamiento prohibiéndole su
+   número. Si la arcada apenas pierde puntuación, el número no es firme: la
+   pieza sale en violeta con el otro número posible.
 
 **Qué esperar**, medido con radiografías que los modelos no vieron al entrenar:
 
@@ -362,7 +361,8 @@ with gr.Blocks(title="dental-vision · odontograma automático", analytics_enabl
                               interactive=False, buttons=["download", "fullscreen"])
             with gr.Tabs():
                 with gr.Tab("Hallazgos"):
-                    hallazgos = gr.Dataframe(interactive=False, wrap=True, elem_id="tabla")
+                    hallazgos = gr.Dataframe(headers=["Pieza", "Hallazgo", "Confianza"], interactive=False,
+                                         wrap=True, elem_id="tabla")
                 with gr.Tab("Exportar (JSON)"):
                     datos = gr.Code(language="json", interactive=False, show_label=False, lines=12,
                                     max_lines=24, buttons=["copy", "download"])
@@ -370,14 +370,16 @@ with gr.Blocks(title="dental-vision · odontograma automático", analytics_enabl
                     gr.Markdown(COMO_FUNCIONA)
     salidas = [texto, figura, hallazgos, datos]
     # Los ejemplos van bajo la entrada, pero necesitan las salidas ya creadas.
+    # Sin caché: Gradio la guarda en un CSV y reescribe en una línea todo texto que
+    # empiece por «{», así que el JSON exportado saldría ilegible.
     with izquierda:
         gr.Examples(
             examples=[[str(AQUI / "ejemplos" / f)] for f in EJEMPLOS],
             inputs=[entrada],
             outputs=[*salidas, umbral],
             fn=ejemplo,
-            cache_examples=True,
-            cache_mode="eager",
+            cache_examples=False,
+            run_on_click=True,
             example_labels=list(EJEMPLOS.values()),
             label="Ejemplos: radiografías que los modelos no vieron al entrenar",
         )
